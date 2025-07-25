@@ -1390,89 +1390,14 @@ class MonitoringThread(QThread):
     def stop(self):
         """스레드 중단 - 최종 데이터 저장 보장"""
         if self.log_manager:
-            buffer_count = len(self._sensor_data_buffer)
+            buffer_count = len(self._sensor_data_buffer) if hasattr(self, '_sensor_data_buffer') else 0
             self.log_manager.operation_log("시스템", 
                 f"모니터링 스레드 중단 요청 - 현재 버퍼: {buffer_count}개 데이터")
         
-        # 1. 실행 플래그 중지
+        # 실행 플래그만 중지하여 스레드가 스스로 종료되도록 유도합니다.
+        # 메인 스레드를 차단하는 wait() 호출을 제거합니다.
         self.is_running = False
         self.is_initializing = False
-        
-        if self.isRunning():
-            if self.log_manager:
-                self.log_manager.operation_log("시스템", "스레드 종료 대기 중... (최대 15초)")
-            
-            # 종료 대기 시간을 15초로 연장 (데이터 저장 시간 고려)
-            if not self.wait(15000):  # 15초로 연장
-                if self.log_manager:
-                    buffer_count = len(self._sensor_data_buffer)
-                    self.log_manager.error_log("시스템", 
-                        f"스레드가 15초 내에 종료되지 않았습니다. "
-                        f"남은 데이터 {buffer_count}개는 강제 종료로 인해 유실될 수 있습니다.")
-                
-                # 강제 종료 전 마지막 저장 시도
-                if hasattr(self, '_sensor_data_buffer') and self._sensor_data_buffer:
-                    try:
-                        if self.log_manager:
-                            self.log_manager.operation_log("시스템", 
-                                "강제 종료 전 최종 저장 시도...")
-                        
-                        # 새로운 이벤트 루프에서 동기적으로 저장 시도
-                        import asyncio
-                        
-                        # 기존 루프가 실행 중이면 새로운 루프 생성
-                        try:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            
-                            # 최종 저장 실행
-                            if (hasattr(self, 'communication_manager') and 
-                                self.communication_manager):
-                                saved_count = loop.run_until_complete(
-                                    self.communication_manager.save_collected_data(
-                                        self._sensor_data_buffer.copy()
-                                    )
-                                )
-                                
-                                if saved_count > 0:
-                                    self._sensor_data_buffer.clear()
-                                    if self.log_manager:
-                                        self.log_manager.operation_log("시스템", 
-                                            f"강제 종료 전 저장 성공: {saved_count}개")
-                                else:
-                                    if self.log_manager:
-                                        self.log_manager.error_log("시스템", 
-                                            "강제 종료 전 저장 실패")
-                            
-                            loop.close()
-                            
-                        except Exception as e:
-                            if self.log_manager:
-                                self.log_manager.error_log("시스템", 
-                                    f"강제 종료 전 저장 중 오류: {str(e)}")
-                    
-                    except Exception as e:
-                        if self.log_manager:
-                            self.log_manager.error_log("시스템", 
-                                f"강제 종료 전 최종 저장 시도 실패: {str(e)}")
-                
-                # 강제 종료
-                self.terminate()
-                
-                if self.log_manager:
-                    self.log_manager.operation_log("시스템", "스레드 강제 종료 완료")
-            else:
-                if self.log_manager:
-                    self.log_manager.operation_log("시스템", "스레드 정상 종료 완료")
-        
-        # 최종 상태 확인
-        if self.log_manager:
-            final_buffer_count = len(self._sensor_data_buffer) if hasattr(self, '_sensor_data_buffer') else 0
-            if final_buffer_count == 0:
-                self.log_manager.operation_log("시스템", "모든 데이터 안전하게 저장됨 - 스레드 종료 완료")
-            else:
-                self.log_manager.operation_log("시스템", 
-                    f"스레드 종료 완료 - 주의: {final_buffer_count}개 데이터 상태 확인 필요")
 
     async def force_save_debug(self):
         """강제 저장 및 디버그 정보 출력"""
@@ -2033,18 +1958,15 @@ class RSDMonitoringMainWindow(QMainWindow):
         self.status_bar.showMessage("모니터링 시작됨")
     
     def stop_monitoring(self):
-        """모니터링 중지 - 데이터 손실 방지"""
+        """모니터링 중지 - 데이터 손실 방지 (finished 시그널 사용)"""
         if not self.monitoring_thread or not self.monitoring_thread.isRunning():
             QMessageBox.information(self, "알림", "현재 모니터링이 실행 중이 아닙니다.")
             return
-        
-        # 현재 버퍼 상태 확인
+
         buffer_count = 0
-        if (hasattr(self.monitoring_thread, '_sensor_data_buffer') and 
-            self.monitoring_thread._sensor_data_buffer):
+        if hasattr(self.monitoring_thread, '_sensor_data_buffer'):
             buffer_count = len(self.monitoring_thread._sensor_data_buffer)
-        
-        # 버퍼에 데이터가 있으면 사용자에게 확인
+
         if buffer_count > 0:
             reply = QMessageBox.question(
                 self, "모니터링 중지 확인",
@@ -2054,59 +1976,35 @@ class RSDMonitoringMainWindow(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes
             )
-            
             if reply != QMessageBox.Yes:
                 return
-        
+
         if LOGGING_AVAILABLE and hasattr(self, 'log_manager'):
-            self.log_manager.operation_log("시스템", 
+            self.log_manager.operation_log("시스템",
                 f"모니터링 중지 요청 - 대기 데이터: {buffer_count}개")
-        
+
         try:
-            # 중지 중 표시
             self.loading_overlay.show_loading(
                 "모니터링을 중지하고 있습니다...",
-                f"데이터를 안전하게 저장하는 중입니다... ({buffer_count}개 대기 중)" if buffer_count > 0 
+                f"데이터를 안전하게 저장하는 중입니다... ({buffer_count}개 대기 중)" if buffer_count > 0
                 else "모니터링을 안전하게 중지하는 중입니다..."
             )
-            
-            # UI 상태 미리 업데이트
+
             self.start_button.setEnabled(False)
             self.stop_button.setEnabled(False)
-            
-            # 진행 상황 표시를 위한 타이머 시작
-            self._stop_progress_timer = QTimer()
-            self._stop_progress_timer.timeout.connect(self._update_stop_progress)
-            self._stop_progress_elapsed = 0
-            self._stop_progress_timer.start(1000)  # 1초마다 업데이트
-            
-            # 모니터링 스레드 중지
+
+            # 스레드 종료 시그널에 대한 핸들러 연결
+            # wait() 대신 finished 시그널을 사용하여 UI 블로킹을 방지합니다.
+            self.monitoring_thread.finished.connect(self._on_monitoring_stopped_success)
+
+            # 스레드에 중지 요청
             self.monitoring_thread.stop()
-            
-            # 별도 스레드에서 대기
-            def wait_for_stop():
-                try:
-                    # 최대 20초 대기 (데이터 저장 시간 고려)
-                    if self.monitoring_thread.wait(20000):
-                        # 정상 종료
-                        QTimer.singleShot(0, self._on_monitoring_stopped_success)
-                    else:
-                        # 시간 초과
-                        QTimer.singleShot(0, self._on_monitoring_stopped_timeout)
-                except Exception as e:
-                    QTimer.singleShot(0, lambda: self._on_monitoring_stopped_error(str(e)))
-            
-            import threading
-            stop_thread = threading.Thread(target=wait_for_stop, daemon=True)
-            stop_thread.start()
-            
+
         except Exception as e:
             if LOGGING_AVAILABLE and hasattr(self, 'log_manager'):
                 self.log_manager.error_log("시스템", f"모니터링 중지 중 오류: {e}")
-            
             self._cleanup_stop_process()
             QMessageBox.critical(self, "오류", f"모니터링 중지 중 오류가 발생했습니다:\n{str(e)}")
-
 
     def _update_stop_progress(self):
         """중지 진행 상황 업데이트"""
