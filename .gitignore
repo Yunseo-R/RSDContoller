@@ -1,0 +1,12 @@
+# editor settings
+.vscode
+.idea
+
+__pycache__
+
+# backup files
+*-bak*
+
+logs
+
+
