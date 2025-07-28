@@ -1716,34 +1716,23 @@ class RSDMonitoringMainWindow(QMainWindow):
         if LOGGING_AVAILABLE and hasattr(self, 'log_manager'):
             self.log_manager.operation_log("시스템", "안전한 프로그램 종료 시작")
         
-        # 모니터링 중이면 중지 확인
+        # 모니터링 중이면 묻지 않고 바로 종료 절차 진행
         if self.monitoring_thread and self.monitoring_thread.isRunning():
-            reply = QMessageBox.question(
-                self, "프로그램 종료",
-                "모니터링이 실행 중입니다.\n프로그램을 종료하시겠습니까?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
+            # 종료 중임을 사용자에게 안내
+            self.loading_overlay.show_loading(
+                "프로그램을 종료하는 중입니다...",
+                "데이터를 안전하게 저장하고 통신을 중단하고 있습니다."
             )
             
-            if reply == QMessageBox.Yes:
-                # 종료 중 표시
-                self.loading_overlay.show_loading(
-                    "프로그램을 종료하는 중입니다...",
-                    "통신을 안전하게 중단하고 있습니다."
-                )
-                
-                # 강제 모니터링 중지
-                self._force_stop_monitoring()
-                
-                # 약간의 지연 후 최종 정리
-                QTimer.singleShot(AppSettings.FINAL_CLEANUP_DELAY, self._final_cleanup_and_exit)
-            else:
-                self.is_exiting = False
-                return
+            # 모니터링 강제 중지 (내부적으로 데이터 저장 시도)
+            self._force_stop_monitoring()
+            
+            # 약간의 지연 후 최종 정리 및 종료
+            QTimer.singleShot(AppSettings.FINAL_CLEANUP_DELAY, self._final_cleanup_and_exit)
         else:
             # 모니터링 중이 아니면 바로 종료
             self._final_cleanup_and_exit()
-    
+
     def _force_stop_monitoring(self):
         """모니터링 강제 중단 - 가능한 한 데이터 보호"""
         if self.monitoring_thread:
@@ -1967,28 +1956,19 @@ class RSDMonitoringMainWindow(QMainWindow):
         if hasattr(self.monitoring_thread, '_sensor_data_buffer'):
             buffer_count = len(self.monitoring_thread._sensor_data_buffer)
 
-        if buffer_count > 0:
-            reply = QMessageBox.question(
-                self, "모니터링 중지 확인",
-                f"현재 저장 대기 중인 데이터가 {buffer_count}개 있습니다.\n\n"
-                f"모니터링을 중지하면 이 데이터들을 먼저 데이터베이스에 저장합니다.\n"
-                f"저장에 시간이 걸릴 수 있습니다. 계속하시겠습니까?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
-            )
-            if reply != QMessageBox.Yes:
-                return
-
         if LOGGING_AVAILABLE and hasattr(self, 'log_manager'):
             self.log_manager.operation_log("시스템",
                 f"모니터링 중지 요청 - 대기 데이터: {buffer_count}개")
 
         try:
-            self.loading_overlay.show_loading(
-                "모니터링을 중지하고 있습니다...",
-                f"데이터를 안전하게 저장하는 중입니다... ({buffer_count}개 대기 중)" if buffer_count > 0
+            # 사용자에게 묻지 않고 바로 저장 및 중지 절차 시작
+            loading_title = "모니터링을 중지하고 있습니다..."
+            loading_detail = (
+                f"남은 데이터 {buffer_count}개를 저장 중입니다. 잠시만 기다려주세요..."
+                if buffer_count > 0
                 else "모니터링을 안전하게 중지하는 중입니다..."
             )
+            self.loading_overlay.show_loading(loading_title, loading_detail)
 
             self.start_button.setEnabled(False)
             self.stop_button.setEnabled(False)
@@ -2005,6 +1985,7 @@ class RSDMonitoringMainWindow(QMainWindow):
                 self.log_manager.error_log("시스템", f"모니터링 중지 중 오류: {e}")
             self._cleanup_stop_process()
             QMessageBox.critical(self, "오류", f"모니터링 중지 중 오류가 발생했습니다:\n{str(e)}")
+
 
     def _update_stop_progress(self):
         """중지 진행 상황 업데이트"""
