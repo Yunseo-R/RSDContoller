@@ -228,16 +228,18 @@ class RSDManager:
 class RSDTestManager:
     """RSD 연결 테스트 전담 관리자"""
     
-    def __init__(self, config: ConfigManager):
+    def __init__(self, config: ConfigManager, alert_repository: Optional[Any] = None):
         """
         테스트 관리자 초기화
         
         Args:
             config: 설정 관리자
+            alert_repository: 알림 저장소 (선택사항)
         """
         self.config = config
         self.protocol = RSDProtocol()
-    
+        self.alert_repository = alert_repository
+
     async def test_rsd_connection(self, string_info: StringInfo, rsd_id: int, 
                                 enable_retry: bool = False, retry_count: int = 1) -> RSDTestResult:
         """
@@ -471,6 +473,8 @@ class RSDTestManager:
         단일 테스트 수행 (기존 test_rsd_connection의 핵심 로직)
         """
         start_time = datetime.now()
+        error_message = ""
+        is_success = False
         
         try:
             # TCP 연결 생성
@@ -494,53 +498,45 @@ class RSDTestManager:
                     timeout=self.config.tcp_read_timeout
                 )
                 
-                # 응답 시간 계산
-                response_time = (datetime.now() - start_time).total_seconds()
-                
                 if not response_data:
-                    return RSDTestResult(
-                        string_id=string_info.string_id,
-                        rsd_id=rsd_id,
-                        is_success=False,
-                        response_time=response_time,
-                        error_message="응답 없음"
-                    )
-                
-                # 응답 헤더 검증
-                is_valid = self.protocol.validate_response_header(response_data)
-                
-                return RSDTestResult(
-                    string_id=string_info.string_id,
-                    rsd_id=rsd_id,
-                    is_success=is_valid,
-                    response_time=response_time,
-                    error_message="" if is_valid else "잘못된 응답 형식"
-                )
+                    error_message = "응답 없음"
+                else:
+                    # 응답 헤더 검증
+                    is_success = self.protocol.validate_response_header(response_data)
+                    if not is_success:
+                        error_message = "잘못된 응답 형식"
                 
             finally:
                 writer.close()
                 await writer.wait_closed()
                 
         except asyncio.TimeoutError:
-            response_time = (datetime.now() - start_time).total_seconds()
-            return RSDTestResult(
-                string_id=string_info.string_id,
-                rsd_id=rsd_id,
-                is_success=False,
-                response_time=response_time,
-                error_message="연결 타임아웃"
-            )
+            error_message = "연결 타임아웃"
             
         except Exception as e:
-            response_time = (datetime.now() - start_time).total_seconds()
-            return RSDTestResult(
-                string_id=string_info.string_id,
-                rsd_id=rsd_id,
-                is_success=False,
-                response_time=response_time,
-                error_message=f"통신 오류: {str(e)}"
-            )
-        
+            error_message = f"통신 오류: {str(e)}"
+
+        response_time = (datetime.now() - start_time).total_seconds()
+
+        # 테스트 실패 시 알림 저장
+        if not is_success and self.alert_repository:
+            try:
+                await self.alert_repository.save_communication_error_alert(
+                    string_id=string_info.string_id,
+                    rsd_id=rsd_id,
+                    error_message=f"연결 테스트 실패: {error_message}"
+                )
+            except Exception as e:
+                logger.error(f"테스트 실패 알림 저장 중 오류 발생: {e}")
+
+        return RSDTestResult(
+            string_id=string_info.string_id,
+            rsd_id=rsd_id,
+            is_success=is_success,
+            response_time=response_time,
+            error_message=error_message
+        )
+
     def get_test_summary(self, test_results: Dict[int, List[RSDTestResult]]) -> Dict[str, Any]:
         """
         테스트 결과 요약 정보 생성 (새 메서드)

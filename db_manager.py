@@ -577,6 +577,43 @@ class AlertRepository:
         except Exception as e:
             logger.error(f"최근 알림 조회 실패: {e}")
             return []
+        
+
+    async def save_communication_error_alert(self, string_id: int, rsd_id: int, 
+                                           error_message: str) -> bool:
+        """
+        통신 오류 알림 저장
+        
+        Args:
+            string_id: String ID
+            rsd_id: RSD ID
+            error_message: 오류 메시지
+            
+        Returns:
+            저장 성공 여부
+        """
+        description = f"통신 오류: {error_message}"
+        return await self.save_alert(string_id, rsd_id, 2, description)
+    
+    async def save_system_error_alert(self, component: str, error_message: str, 
+                                    string_id: Optional[int] = None, 
+                                    rsd_id: Optional[int] = None) -> bool:
+        """
+        시스템 오류 알림 저장
+        
+        Args:
+            component: 오류 발생 컴포넌트
+            error_message: 오류 메시지
+            string_id: String ID (선택사항)
+            rsd_id: RSD ID (선택사항)
+            
+        Returns:
+            저장 성공 여부
+        """
+        description = f"[{component}] {error_message}"
+        log_type = 3  # 시스템 오류
+        return await self.save_alert(string_id, rsd_id, log_type, description)
+
 
 
 # =============================================================================

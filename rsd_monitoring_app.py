@@ -1087,58 +1087,59 @@ class MonitoringThread(QThread):
         """시스템 초기화 - 연결 테스트와 실제 통신 분리"""
         try:
             self.initialization_progress.emit(
-                "시스템 초기화 중...", 
+                "시스템 초기화 중...",
                 "데이터베이스 연결을 설정하고 있습니다..."
             )
-            
+
             # 1. 데이터베이스 연결 초기화
             db_config = DatabaseConfig(
                 host=self.config_manager.database_host,
                 port=self.config_manager.database_port,
                 database=self.config_manager.database_name,
                 username=self.config_manager.database_username,
-                password=self.config_manager.database_password
+                password=self.config_manager.database_password  # 수정된 부분
             )
-            
+
             # DatabaseManager 사용
             self.db_manager = DatabaseManager(db_config)
             if not await self.db_manager.initialize():
                 return False
-            
+
             # 연결 테스트
             if not await self.db_manager.test_connection():
                 return False
-            
+
             # 2. 연결 테스트 수행
             self.initialization_progress.emit(
-                "기기 연결 테스트 중...", 
+                "기기 연결 테스트 중...",
                 "RSD 기기들과의 연결을 테스트하고 있습니다..."
             )
-            
+
             # StringManager와 RSDManager 초기화
             from set_string import StringManager, RSDManager, RSDTestManager
-            
+
             string_manager = StringManager()
             rsd_manager = RSDManager()
             string_manager.set_device_repository(self.db_manager.get_device_repository())
             rsd_manager.set_device_repository(self.db_manager.get_device_repository())
-            
-            # 연결 테스트 관리자 초기화
-            test_manager = RSDTestManager(self.config_manager)
-            
+
+            # 연결 테스트 관리자 초기화 (AlertRepository 주입)
+            alert_repo = self.db_manager.get_alert_repository()
+            test_manager = RSDTestManager(self.config_manager, alert_repository=alert_repo)
+
             # 모든 String에 대해 연결 테스트 수행
             test_results = await test_manager.test_all_strings(string_manager, rsd_manager)
-            
+
             # 테스트 결과에서 성공한 기기들만 추출
             active_strings = []
             active_devices = []
-            
+
             for string_id, string_results in test_results.items():
                 # String 정보 조회
                 string_info = await string_manager.get_string_by_id(string_id)
                 if not string_info:
                     continue
-                
+
                 # 성공한 RSD 목록 추출
                 successful_rsds = []
                 for result in string_results:
@@ -1147,47 +1148,65 @@ class MonitoringThread(QThread):
                         rsd_info = await rsd_manager.get_rsd_by_id(string_id, result.rsd_id)
                         if rsd_info:
                             successful_rsds.append(rsd_info)
-                
+
                 # 성공한 RSD가 있으면 String 활성화
                 if successful_rsds:
                     active_strings.append(string_info)
                     active_devices.extend(successful_rsds)
                     if self.log_manager:
                         self.log_manager.operation_log("연결테스트", f"String {string_id} 연결 테스트 완료: {len(successful_rsds)}개 RSD 활성화")
-            
+
             if not active_strings:
+                if self.log_manager:
+                    self.log_manager.error_log("시스템", "활성화된 RSD 기기가 없어 모니터링을 시작할 수 없습니다.")
+                if self.db_manager and self.db_manager.is_initialized():
+                    if alert_repo:
+                        await alert_repo.save_system_error_alert(
+                            component="System",
+                            error_message="활성화된 RSD 기기 없음"
+                        )
                 return False
-            
+
             # 3. 통신 관리자 초기화
             self.initialization_progress.emit(
-                "통신 시스템 초기화 중...", 
+                "통신 시스템 초기화 중...",
                 "실제 데이터 수집 시스템을 준비하고 있습니다..."
             )
-            
+
             from communication import CommunicationManager
-            
+
             self.communication_manager = CommunicationManager(self.config_manager, self.db_manager, self.log_manager)
-            
+
             if not await self.communication_manager.initialize():
                 return False
-            
+
             # 4. 연결 테스트 결과를 통신 관리자에 전달
             self.communication_manager.set_active_devices(active_strings, active_devices)
-            
+
             self.initialization_progress.emit(
-                "초기화 완료", 
+                "초기화 완료",
                 "모니터링을 시작합니다..."
             )
-            
+
             if self.log_manager:
                 self.log_manager.operation_log("시스템", "시스템 초기화 완료")
-            
+
             return True
-            
+
         except Exception as e:
+            error_msg = f"시스템 초기화 실패: {str(e)}"
             if self.log_manager:
-                self.log_manager.error_log("시스템", f"시스템 초기화 실패: {str(e)}")
+                self.log_manager.error_log("시스템", error_msg)
+            # DB 연결이 성공했다면, 시스템 오류 알림 저장
+            if self.db_manager and self.db_manager.is_initialized():
+                alert_repo = self.db_manager.get_alert_repository()
+                if alert_repo:
+                    await alert_repo.save_system_error_alert(
+                        component="SystemInitialize",
+                        error_message=str(e)
+                    )
             return False
+
 
     async def _cleanup_resources(self):
         """리소스 정리 작업 - 향상된 정리 로직"""

@@ -292,6 +292,10 @@ class RSDDataCollector:
                     string_info.string_id, device.rsd_id, "sensor_poll", 
                     "timeout", duration
                 )
+            if self.alert_repository: # AlertRepository가 주입되었을 때만 호출
+                await self.alert_repository.save_communication_error_alert(
+                    string_info.string_id, device.rsd_id, "Connection timeout"
+                )
             return None
             
         except Exception as e:
@@ -301,8 +305,13 @@ class RSDDataCollector:
                     string_info.string_id, device.rsd_id, "sensor_poll", 
                     "error", duration, str(e)
                 )
+            if self.alert_repository: # AlertRepository가 주입되었을 때만 호출
+                await self.alert_repository.save_communication_error_alert(
+                    string_info.string_id, device.rsd_id, str(e)
+                )
             return None
-    
+
+
     async def close_all_connections(self):
         """데이터 수집기의 모든 연결 종료"""
         try:
@@ -465,8 +474,15 @@ class CommunicationManager:
         except Exception as e:
             if self.log_manager:
                 self.log_manager.error_log("데이터저장", f"데이터 저장 실패: {e}")
+            # DB 저장 오류 발생 시 알림 저장
+            if self.alert_repository:
+                await self.alert_repository.save_system_error_alert(
+                    component="Database", 
+                    error_message=f"DB 저장 실패: {str(e)}"
+                )
             return 0
-    
+
+
     async def save_sensor_data_batch(self, sensor_data_list: List[RSDSensorData]) -> Dict[str, int]:
         """
         센서 데이터 배치 저장 (호환성을 위한 메서드)
