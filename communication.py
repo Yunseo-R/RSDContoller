@@ -179,24 +179,26 @@ class RSDCommunicationProtocol:
 
 
 # =============================================================================
-# 데이터 수집기 클래스 (LogManager 의존성 주입만 추가)
+# 데이터 수집기 클래스
 # =============================================================================
 
 class RSDDataCollector:
     """RSD 데이터 수집기 - 실제 TCP 통신 담당"""
     
-    def __init__(self, config: ConfigManager, log_manager=None):
+    def __init__(self, config: ConfigManager, log_manager=None, alert_repository=None):
         """
-        데이터 수집기 초기화 (LogManager 파라미터만 추가)
+        데이터 수집기 초기화
         
         Args:
             config: 설정 관리자
-            log_manager: LogManager 인스턴스 (선택사항)
+            log_manager: LogManager 인스턴스
+            alert_repository: AlertRepository 인스턴스
         """
         self.config = config
-        self.log_manager = log_manager  # LogManager 추가
+        self.log_manager = log_manager 
         self.protocol = RSDCommunicationProtocol(log_manager)
-    
+        self.alert_repository = alert_repository
+
     async def collect_string_data(self, string_info: StringInfo, 
                                  devices: List[DeviceInfo]) -> List[RSDSensorData]:
         """
@@ -311,7 +313,6 @@ class RSDDataCollector:
                 )
             return None
 
-
     async def close_all_connections(self):
         """데이터 수집기의 모든 연결 종료"""
         try:
@@ -348,12 +349,14 @@ class CommunicationManager:
         self.config = config
         self.db_manager = db_manager
         self.log_manager = log_manager
-        self.data_collector = RSDDataCollector(config, log_manager)  # LogManager 전달
         
         # Repository 접근
         self.sensor_repository = db_manager.get_sensor_repository()
         self.device_repository = db_manager.get_device_repository()
         self.alert_repository = db_manager.get_alert_repository()
+        
+        # RSDDataCollector 생성 시 alert_repository 전달
+        self.data_collector = RSDDataCollector(config, log_manager, self.alert_repository)
         
         # 활성 기기 목록
         self.active_strings: List[StringInfo] = []
@@ -361,7 +364,7 @@ class CommunicationManager:
         
         # 통계 초기화
         self._reset_statistics()
-    
+
     def _reset_statistics(self) -> None:
         """통계 정보 초기화"""
         self.total_requests = 0

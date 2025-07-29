@@ -11,6 +11,9 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass
 
+import os
+import csv
+
 from config_manager import DatabaseConfig
 
 logger = logging.getLogger(__name__)
@@ -460,7 +463,7 @@ class DeviceRepository:
 
 
 # =============================================================================
-# 알림 저장소 클래스 (개선됨 - 아크 로그 형식 변경)
+# 알림 저장소 클래스
 # =============================================================================
 
 class AlertRepository:
@@ -673,7 +676,63 @@ class DatabaseManager:
             self.alert_repository = None
             self._is_initialized = False
             logger.info("데이터베이스 매니저 종료")
-    
+
+    # =========================================================================
+    # 신규 메서드: CSV 백업
+    # =========================================================================
+    def backup_data_to_csv(self, sensor_data_list: List[RSDSensorData]) -> str:
+        """
+        저장 실패한 센서 데이터를 CSV 파일로 백업합니다.
+
+        Args:
+            sensor_data_list: 백업할 센서 데이터 리스트
+
+        Returns:
+            저장된 CSV 파일의 경로. 실패 시 빈 문자열 반환.
+        """
+        if not sensor_data_list:
+            return ""
+
+        backup_dir = "backup_data"
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            file_path = os.path.join(backup_dir, f"backup_{timestamp}.csv")
+
+            header = [
+                'timestamp', 'string_id', 'rsd_id', 'channel_no', 
+                'temperature', 'current', 'is_arc', 'arc_frequency', 
+                'arc_count', 'rsd_status'
+            ]
+
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+
+                for data in sensor_data_list:
+                    for channel in data.channels:
+                        row = [
+                            data.timestamp.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                            data.string_id,
+                            data.rsd_id,
+                            channel.channel_no,
+                            channel.temperature,
+                            channel.current,
+                            channel.is_arc,
+                            channel.arc_frequency,
+                            channel.arc_count,
+                            data.rsd_status
+                        ]
+                        writer.writerow(row)
+            
+            logger.info(f"데이터 백업 성공: {len(sensor_data_list)}개 RSD 데이터 -> {file_path}")
+            return file_path
+
+        except Exception as e:
+            logger.error(f"CSV 백업 실패: {e}")
+            return ""
+
     def get_sensor_repository(self) -> Optional[SensorDataRepository]:
         """센서 데이터 저장소 반환"""
         if not self._is_initialized:
