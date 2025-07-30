@@ -1,8 +1,6 @@
 """
 RSD 모니터링 시스템 설정 관리자
-설정 파일 생성, 파싱, 관리
-명시적 의존성 주입을 위한 중앙 설정 관리
-LogManager 의존성 제거 - 직접 logging 사용 최소화
+설정 파일(config.ini)의 생성, 파싱, 저장을 담당함.
 """
 
 import os
@@ -17,7 +15,7 @@ from dataclasses import dataclass
 
 @dataclass
 class DatabaseConfig:
-    """데이터베이스 설정 클래스"""
+    """데이터베이스 연결 설정 정보 저장"""
     host: str
     port: int
     database: str
@@ -42,14 +40,14 @@ class ConfigManager:
         self.config_path = config_path
         self.config = configparser.ConfigParser()
         
-        # 기본 설정 값들
+        # 기본 설정값 정의
         self._init_default_values()
         
         # 설정 파일 로드 또는 생성
         self._load_or_create_config()
     
     def _init_default_values(self) -> None:
-        """기본 설정 값 초기화"""
+        """설정 파일 생성시 모든 설정 항목의 기본값 초기화"""
         # 데이터베이스 설정
         self.database_host = "192.168.10.8"
         self.database_port = 5432
@@ -82,9 +80,8 @@ class ConfigManager:
         self.logging_communication_detail = False
     
     def _load_or_create_config(self) -> None:
-        """설정 파일 로드 또는 생성"""
+        """설정 파일 로드, 없을 시 기본값으로 생성"""
         if os.path.exists(self.config_path):
-            # 콘솔에 간단한 메시지만 출력 (logging 사용 안 함)
             print(f"기존 설정 파일 로드: {self.config_path}")
             self._load_config()
         else:
@@ -94,11 +91,11 @@ class ConfigManager:
             print("기본 설정 파일이 생성되었습니다.")
     
     def _load_config(self) -> None:
-        """설정 파일 로드"""
+        """설정 파일(ini)을 읽어 각 변수에 값을 로드"""
         try:
             self.config.read(self.config_path, encoding='utf-8')
             
-            # 데이터베이스 설정
+            # 데이터베이스 설정 로드
             if self.config.has_section('database'):
                 self.database_host = self.config.get('database', 'host', fallback=self.database_host)
                 self.database_port = self.config.getint('database', 'port', fallback=self.database_port)
@@ -106,14 +103,14 @@ class ConfigManager:
                 self.database_username = self.config.get('database', 'username', fallback=self.database_username)
                 self.database_password = self.config.get('database', 'password', fallback=self.database_password)
             
-            # 모니터링 설정
+            # 모니터링 설정 로드
             if self.config.has_section('monitoring'):
                 self.monitoring_display_interval = self.config.getint('monitoring', 'display_interval', fallback=self.monitoring_display_interval)
                 self.monitoring_communication_interval = self.config.getint('monitoring', 'communication_interval', fallback=self.monitoring_communication_interval)
                 self.monitoring_save_interval = self.config.getint('monitoring', 'save_interval', fallback=self.monitoring_save_interval)
                 self.monitoring_rsd_communication_delay = self.config.getfloat('monitoring', 'rsd_communication_delay', fallback=self.monitoring_rsd_communication_delay)
             
-            # TCP 통신 설정
+            # TCP 통신 설정 로드
             if self.config.has_section('tcp_communication'):
                 self.tcp_connection_timeout = self.config.getfloat('tcp_communication', 'connection_timeout', fallback=self.tcp_connection_timeout)
                 self.tcp_read_timeout = self.config.getfloat('tcp_communication', 'read_timeout', fallback=self.tcp_read_timeout)
@@ -123,7 +120,7 @@ class ConfigManager:
                 self.tcp_socket_reuse = self.config.getboolean('tcp_communication', 'socket_reuse', fallback=self.tcp_socket_reuse)
                 self.tcp_buffer_size = self.config.getint('tcp_communication', 'buffer_size', fallback=self.tcp_buffer_size)
             
-            # 로깅 설정
+            # 로깅 설정 로드
             if self.config.has_section('logging'):
                 self.logging_level = self.config.get('logging', 'level', fallback=self.logging_level)
                 self.logging_dir = self.config.get('logging', 'log_dir', fallback=self.logging_dir)
@@ -138,9 +135,10 @@ class ConfigManager:
             print("일부 설정이 기본값으로 사용됩니다")
 
     def _create_default_config(self) -> None:
-        """기본 설정 파일 생성"""
+        """기본 설정값으로 ConfigParser 객체 생성."""
         self.config.clear()
         
+        # 각 섹션 및 키-값 설정
         # Database 섹션
         self.config.add_section('database')
         self.config.set('database', 'host', self.database_host)
@@ -177,7 +175,7 @@ class ConfigManager:
         self.config.set('logging', 'communication_detail', str(self.logging_communication_detail).lower())
     
     def _sync_variables_to_config(self) -> None:
-        """현재 변수 값들을 config 객체에 동기화"""
+        """현재 인스턴스 변수 값을 ConfigParser 객체에 동기화."""
         # Database 섹션
         if not self.config.has_section('database'):
             self.config.add_section('database')
@@ -223,9 +221,10 @@ class ConfigManager:
             # 현재 변수값들을 config 객체에 동기화
             self._sync_variables_to_config()
             
-            # 파일로 저장
+            # 파일 경로의 디렉터리가 없으면 생성
             os.makedirs(os.path.dirname(self.config_path) if os.path.dirname(self.config_path) else '.', exist_ok=True)
             
+            # 파일에 저장
             with open(self.config_path, 'w', encoding='utf-8') as configfile:
                 self.config.write(configfile)
                 
@@ -337,11 +336,10 @@ class ConfigManager:
             self.logging_communication_detail = communication_detail
         
         self._save_config()
-        # LogManager가 초기화된 후에는 해당 로그를 사용할 수 있지만, 여기서는 단순 출력
         print("로깅 설정이 업데이트되었습니다")
     
     def reload_config(self) -> None:
-        """설정 파일 다시 로드"""
+        """설정 파일을 다시 로드하여 현재 설정에 반영."""
         self._load_config()
         print("설정 파일 재로드 완료")
     
@@ -350,7 +348,7 @@ class ConfigManager:
         self._save_config()
     
     def log_current_settings(self) -> None:
-        """현재 설정 값들을 출력 (LogManager 초기화 전에는 print 사용)"""
+        """현재 적용된 모든 설정 값을 콘솔에 출력."""
         print("=== 현재 설정 값 ===")
         print(f"DB: {self.database_host}:{self.database_port}/{self.database_name}")
         print(f"모니터링: 표시 {self.monitoring_display_interval}초, 저장 {self.monitoring_save_interval}초, 통신 주기 {self.monitoring_communication_interval}초, 통신간격 {self.monitoring_rsd_communication_delay}초")

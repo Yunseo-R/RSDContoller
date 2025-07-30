@@ -313,6 +313,7 @@ class RSDDataCollector:
                 )
             return None
 
+
     async def close_all_connections(self):
         """데이터 수집기의 모든 연결 종료"""
         try:
@@ -418,6 +419,7 @@ class CommunicationManager:
             self.log_manager.operation_log("통신시스템", 
                 f"활성 기기 설정 완료: String {len(self.active_strings)}개, RSD {total_devices}개")
     
+
     async def collect_all_data(self) -> List[RSDSensorData]:
         """모든 활성 기기에서 데이터 수집 (원본 메서드명 유지)"""
         all_data = []
@@ -428,6 +430,20 @@ class CommunicationManager:
                 if string_info.string_id in self.active_devices:
                     devices = self.active_devices[string_info.string_id]
                     string_data = await self.data_collector.collect_string_data(string_info, devices)
+                    
+                    # 아크 발생 즉시 알림 저장 로직 추가
+                    if self.alert_repository:
+                        for sensor_data in string_data:
+                            for channel in sensor_data.channels:
+                                if channel.is_arc:
+                                    await self.alert_repository.save_arc_alert(
+                                        sensor_data.string_id,
+                                        sensor_data.rsd_id,
+                                        channel.channel_no,
+                                        channel.arc_frequency,
+                                        channel.arc_count
+                                    )
+
                     all_data.extend(string_data)
                     
                     self.total_requests += len(devices)
@@ -447,7 +463,8 @@ class CommunicationManager:
             if self.log_manager:
                 self.log_manager.error_log("통신시스템", f"데이터 수집 중 오류: {e}")
             return []
-    
+
+
     async def save_collected_data(self, sensor_data_list: List[RSDSensorData]) -> int:
         """
         수집된 데이터를 데이터베이스에 저장 (Repository를 통해)
@@ -463,7 +480,7 @@ class CommunicationManager:
             
             saved_count = result.get('success_count', 0)
             error_count = result.get('error_count', 0)
-            
+                        
             if self.log_manager:
                 if error_count > 0:
                     self.log_manager.operation_log("데이터저장", 
@@ -484,7 +501,6 @@ class CommunicationManager:
                     error_message=f"DB 저장 실패: {str(e)}"
                 )
             return 0
-
 
     async def save_sensor_data_batch(self, sensor_data_list: List[RSDSensorData]) -> Dict[str, int]:
         """

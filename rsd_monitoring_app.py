@@ -2007,23 +2007,39 @@ class RSDMonitoringMainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """윈도우 종료 이벤트를 처리합니다."""
-        # 1. 모니터링이 실행 중인 경우
+        # 모니터링 스레드가 실행 중인지 확인
         if self.monitoring_thread and self.monitoring_thread.isRunning():
-            # 사용자에게 경고 메시지를 표시하고
-            QMessageBox.warning(self, "종료 불가", "모니터링이 진행중입니다. 먼저 모니터링을 종료해주세요.")
-            # 종료 이벤트를 무시하여 창이 닫히지 않도록 합니다.
-            event.ignore()
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("종료 확인")
+            msg_box.setText("모니터링이 진행중입니다.\n안전한 종료를 위해 모니터링 중단 후 프로그램 종료를 권장합니다.\n프로그램을 계속 종료하시겠습니까?")
+            msg_box.setIcon(QMessageBox.Question)
+            
+            # 버튼 추가
+            exit_button = msg_box.addButton("프로그램 종료", QMessageBox.DestructiveRole)
+            confirm_button = msg_box.addButton("취소", QMessageBox.RejectRole)
+
+            msg_box.exec()
+
+            # 사용자가 '프로그램 종료' 버튼을 클릭한 경우
+            if msg_box.clickedButton() == exit_button:
+                if self.log_manager:
+                    self.log_manager.operation_log("시스템", "사용자가 프로그램 강제 종료를 선택했습니다.")
+                # is_exiting 플래그와 함께 모니터링 중지 요청
+                self._request_monitoring_stop(is_exiting=True)
+                # 스레드가 안전하게 종료될 때까지 창이 닫히지 않도록 이벤트를 무시합니다.
+                event.ignore()
+            else:
+                # '확인'을 누르거나 대화상자를 닫은 경우, 종료를 취소합니다.
+                event.ignore()
             return
 
-        # 2. 모니터링 중이 아닌 경우 (정상 종료)
-        # is_exiting 플래그로 중복 실행 방지
+        # 모니터링 중이 아닐 때의 기존 종료 로직
         if self.is_exiting:
             event.accept()
             return
 
-        # 종료 프로세스 시작
         self.is_exiting = True
-        self._final_cleanup_and_exit() # 리소스 정리 및 QApplication.quit() 호출
+        self._final_cleanup_and_exit()
         event.accept()
 
 # =============================================================================
