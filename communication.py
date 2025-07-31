@@ -291,12 +291,12 @@ class RSDDataCollector:
             duration = (datetime.now() - start_time).total_seconds()
             if self.log_manager:
                 self.log_manager.communication_log(
-                    string_info.string_id, device.rsd_id, "sensor_poll", 
-                    "timeout", duration
+                    string_info.string_id, device.rsd_id, "sensor_poll", "timeout", duration
                 )
-            if self.alert_repository: # AlertRepository가 주입되었을 때만 호출
+            if self.alert_repository:
                 await self.alert_repository.save_communication_error_alert(
-                    string_info.string_id, device.rsd_id, "Connection timeout"
+                    string_info.string_id, device.rsd_id, "Connection timeout",
+                    event_time=start_time
                 )
             return None
             
@@ -304,12 +304,12 @@ class RSDDataCollector:
             duration = (datetime.now() - start_time).total_seconds()
             if self.log_manager:
                 self.log_manager.communication_log(
-                    string_info.string_id, device.rsd_id, "sensor_poll", 
-                    "error", duration, str(e)
+                    string_info.string_id, device.rsd_id, "sensor_poll", "error", duration, str(e)
                 )
-            if self.alert_repository: # AlertRepository가 주입되었을 때만 호출
+            if self.alert_repository:
                 await self.alert_repository.save_communication_error_alert(
-                    string_info.string_id, device.rsd_id, str(e)
+                    string_info.string_id, device.rsd_id, str(e),
+                    event_time=start_time
                 )
             return None
 
@@ -441,7 +441,8 @@ class CommunicationManager:
                                         sensor_data.rsd_id,
                                         channel.channel_no,
                                         channel.arc_frequency,
-                                        channel.arc_count
+                                        channel.arc_count,
+                                        event_time=sensor_data.timestamp
                                     )
 
                     all_data.extend(string_data)
@@ -569,13 +570,13 @@ class CommunicationManager:
             for channel in sensor_data.channels:
                 if channel.is_arc:
                     try:
-                        # DB에 아크 알림 저장
                         await self.alert_repository.save_arc_alert(
                             sensor_data.string_id,
                             sensor_data.rsd_id,
                             channel.channel_no,
                             channel.arc_frequency,
-                            channel.arc_count
+                            channel.arc_count,
+                            event_time=sensor_data.timestamp
                         )
                         
                         # 아크 감지 로그

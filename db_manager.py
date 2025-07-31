@@ -63,6 +63,16 @@ class DeviceInfo:
     channel_count: int
     use_yn: str
 
+@dataclass
+class AlertData:
+    """알림 데이터"""
+    string_id: Optional[int]
+    rsd_id: Optional[int]
+    log_type: int
+    log_title: str
+    log_content: str
+    reg_date: datetime
+    channel_no: Optional[int] = None
 
 # =============================================================================
 # 데이터베이스 연결 클래스
@@ -81,7 +91,12 @@ class DatabaseConnection:
         self.config = config
         self._pool: Optional[asyncpg.Pool] = None
         self.is_connected = False
+        self._db_manager: Optional['DatabaseManager'] = None
     
+    def set_db_manager(self, db_manager: 'DatabaseManager'):
+        """DatabaseManager에 대한 참조 설정"""
+        self._db_manager = db_manager
+
     async def connect(self) -> bool:
         """
         데이터베이스 연결 풀 생성
@@ -154,7 +169,7 @@ class DatabaseConnection:
     
     async def execute_command(self, query: str, *args) -> str:
         """
-        INSERT/UPDATE/DELETE 쿼리 실행
+        INSERT/UPDATE/DELETE 쿼리 실행 (연결 상태 감지 로직 추가)
         
         Args:
             query: SQL 쿼리
@@ -164,30 +179,53 @@ class DatabaseConnection:
             실행 결과 상태
         """
         try:
+            if not self._pool:
+                raise ConnectionError("데이터베이스 풀이 초기화되지 않았습니다.")
+            
             async with self._pool.acquire() as conn:
                 result = await conn.execute(query, *args)
+                # 쓰기 성공 시, '연결 끊김' 상태였다면 복구 처리 시작
+                if self._db_manager and self._db_manager.get_disconnection_flag():
+                    asyncio.create_task(self._db_manager.handle_db_reconnection())
                 return result
                 
+        except (OSError, asyncpg.exceptions.ConnectionDoesNotExistError, ConnectionError) as e:
+            # 연결 오류 발생 시 '연결 끊김' 플래그 설정
+            if self._db_manager:
+                self._db_manager.set_disconnection_flag(True)
+            logger.error(f"명령 실행 실패 (연결 오류 감지): {e}")
+            raise
         except Exception as e:
             logger.error(f"명령 실행 실패: {e}")
             raise
     
     async def execute_many(self, query: str, args_list: List[tuple]) -> None:
         """
-        배치 명령 실행
+        배치 명령 실행 (연결 상태 감지 로직 추가)
         
         Args:
             query: SQL 쿼리
             args_list: 파라미터 리스트
         """
         try:
+            if not self._pool:
+                raise ConnectionError("데이터베이스 풀이 초기화되지 않았습니다.")
+
             async with self._pool.acquire() as conn:
                 await conn.executemany(query, args_list)
-                
+                # 배치 쓰기 성공 시, '연결 끊김' 상태였다면 복구 처리 시작
+                if self._db_manager and self._db_manager.get_disconnection_flag():
+                    asyncio.create_task(self._db_manager.handle_db_reconnection())
+
+        except (OSError, asyncpg.exceptions.ConnectionDoesNotExistError, ConnectionError) as e:
+            # 연결 오류 발생 시 '연결 끊김' 플래그 설정
+            if self._db_manager:
+                self._db_manager.set_disconnection_flag(True)
+            logger.error(f"배치 명령 실행 실패 (연결 오류 감지): {e}")
+            raise
         except Exception as e:
             logger.error(f"배치 명령 실행 실패: {e}")
             raise
-
 
 # =============================================================================
 # 센서 데이터 저장소 클래스
@@ -469,93 +507,137 @@ class DeviceRepository:
 class AlertRepository:
     """알림 저장소"""
     
-    def __init__(self, connection: DatabaseConnection):
+    def __init__(self, connection: DatabaseConnection, db_manager: 'DatabaseManager'):
         """
         알림 저장소 초기화
         
         Args:
             connection: 데이터베이스 연결
+            db_manager: 데이터베이스 매니저 (백업 기능에 사용)
         """
         self.connection = connection
+        self.db_manager = db_manager
     
-    async def save_alert(self, string_id: int, rsd_id: int, log_type: int, 
-                        description: str, channel_no: Optional[int] = None) -> bool:
+    async def _attempt_save_alert(self, alert: AlertData) -> None:
         """
-        알림 저장
+        실제 DB에 알림 저장을 시도하는 내부 메서드. 실패 시 예외를 발생시킵니다.
+        """
+        insert_query = """
+        INSERT INTO TB_ALERT_LOG3 (
+            string_id, rsd_id, log_type, log_title, log_content, reg_date
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+        """
+        await self.connection.execute_command(
+            insert_query,
+            alert.string_id,
+            alert.rsd_id,
+            alert.log_type,
+            alert.log_title,
+            alert.log_content,
+            alert.reg_date
+        )
+
+    
+    async def save_alert(self, string_id: Optional[int], rsd_id: Optional[int], log_type: int,
+                        description: str, channel_no: Optional[int] = None,
+                        event_time: Optional[datetime] = None) -> bool:
+        """
+        알림 저장 (재시도, 백업, 시간 지정 로직 추가)
         
         Args:
             string_id: String ID
-            rsd_id: RSD ID  
+            rsd_id: RSD ID
             log_type: 알림 타입 (1: 아크 발생, 2: 통신 오류, 3: 시스템 오류)
             description: 알림 설명
             channel_no: 채널 번호 (선택사항)
+            event_time: 이벤트 발생 시간 (None이면 현재 시간 사용)
             
         Returns:
-            저장 성공 여부
+            저장 성공 여부 (DB 저장 또는 백업 성공 시 True)
         """
+        if channel_no is not None:
+            log_title = f"채널 {channel_no} 알림"
+        else:
+            log_title = "시스템 알림"
+
+        alert_data = AlertData(
+            string_id=string_id,
+            rsd_id=rsd_id,
+            log_type=log_type,
+            log_title=log_title,
+            log_content=description,
+            reg_date=event_time if event_time is not None else datetime.now(),
+            channel_no=channel_no
+        )
+
+        # 1. 1차 저장 시도
         try:
-            insert_query = """
-            INSERT INTO TB_ALERT_LOG3 (
-                string_id, rsd_id, log_type, log_title, log_content, reg_date
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-            """
-            
-            # log_title과 log_content 구성
-            if channel_no:
-                log_title = f"채널 {channel_no} 알림"
-            else:
-                log_title = "시스템 알림"
-            
-            await self.connection.execute_command(
-                insert_query,
-                string_id,
-                rsd_id,
-                log_type,
-                log_title,
-                description,
-                datetime.now()
-            )
-            
+            await self._attempt_save_alert(alert_data)
             logger.info(f"알림 저장 완료 - String {string_id}, RSD {rsd_id}: {description}")
             return True
-            
         except Exception as e:
-            logger.error(f"알림 저장 실패 - String {string_id}, RSD {rsd_id}: {e}")
+            logger.warning(f"알림 저장 1차 실패, 재시도합니다. 오류: {e}")
+
+        # 2. 재시도 (1회)
+        await asyncio.sleep(0.5)
+        try:
+            await self._attempt_save_alert(alert_data)
+            logger.info(f"알림 저장 재시도 성공 - String {string_id}, RSD {rsd_id}: {description}")
+            return True
+        except Exception as e:
+            logger.error(f"알림 저장 재시도 실패. CSV 백업을 시도합니다. 오류: {e}")
+        
+        # 3. CSV 백업
+        try:
+            file_path = self.db_manager.backup_alerts_to_csv([alert_data])
+            if file_path:
+                logger.info(f"알림 데이터 백업 성공 -> {file_path}")
+                return True
+            else:
+                logger.error("치명적 오류: 알림 데이터 CSV 백업마저 실패했습니다.")
+                return False
+        except Exception as e:
+            logger.error(f"알림 데이터 CSV 백업 중 예외 발생: {e}")
             return False
-    
+
     async def save_arc_alert(self, string_id: int, rsd_id: int, channel_no: int, 
-                           arc_frequency: int, arc_count: int) -> bool:
+                        arc_frequency: int, arc_count: int,
+                        event_time: Optional[datetime] = None) -> bool:
         """
-        아크 발생 알림 저장 (아크 주파수 기반)
+        아크 발생 알림 저장 (이벤트 시간 전달 기능 추가)
         
         Args:
             string_id: String ID
             rsd_id: RSD ID
             channel_no: 채널 번호
-            arc_frequency: 아크 주파수 (Hz)
+            arc_frequency: 아크 주파수 (KHz)
             arc_count: 감지 횟수
+            event_time: 이벤트 발생 시간
             
         Returns:
             저장 성공 여부
         """
         description = f"아크 발생 감지 - CH{channel_no} ({arc_frequency} KHz / {arc_count}회)"
-        return await self.save_alert(string_id, rsd_id, 1, description, channel_no)
-    
+        return await self.save_alert(string_id, rsd_id, 1, description, channel_no, event_time=event_time)
+
     async def save_communication_error_alert(self, string_id: int, rsd_id: int, 
-                                           error_message: str) -> bool:
+                                        error_message: str,
+                                        event_time: Optional[datetime] = None) -> bool:
         """
-        통신 오류 알림 저장
+        통신 오류 알림 저장 (이벤트 시간 전달 기능 추가)
         
         Args:
             string_id: String ID
             rsd_id: RSD ID
             error_message: 오류 메시지
+            event_time: 이벤트 발생 시간
             
         Returns:
             저장 성공 여부
         """
         description = f"통신 오류: {error_message}"
-        return await self.save_alert(string_id, rsd_id, 2, description)
+        return await self.save_alert(string_id, rsd_id, 2, description, event_time=event_time)
+
     
     async def get_recent_alerts(self, limit: int = 100) -> List[Dict[str, Any]]:
         """
@@ -599,25 +681,25 @@ class AlertRepository:
         return await self.save_alert(string_id, rsd_id, 2, description)
     
     async def save_system_error_alert(self, component: str, error_message: str, 
-                                    string_id: Optional[int] = None, 
-                                    rsd_id: Optional[int] = None) -> bool:
+                                string_id: Optional[int] = None, 
+                                rsd_id: Optional[int] = None,
+                                event_time: Optional[datetime] = None) -> bool:
         """
-        시스템 오류 알림 저장
+        시스템 오류 알림 저장 (이벤트 시간 전달 기능 추가)
         
         Args:
             component: 오류 발생 컴포넌트
             error_message: 오류 메시지
             string_id: String ID (선택사항)
             rsd_id: RSD ID (선택사항)
+            event_time: 이벤트 발생 시간
             
         Returns:
             저장 성공 여부
         """
         description = f"[{component}] {error_message}"
         log_type = 3  # 시스템 오류
-        return await self.save_alert(string_id, rsd_id, log_type, description)
-
-
+        return await self.save_alert(string_id, rsd_id, log_type, description, event_time=event_time)
 
 # =============================================================================
 # 데이터베이스 매니저
@@ -642,6 +724,9 @@ class DatabaseManager:
         self.alert_repository: Optional[AlertRepository] = None
         
         self._is_initialized = False
+        self._current_log_backup_path: Optional[str] = None
+        self._db_was_disconnected = False
+        self._backup_processing_lock = asyncio.Lock()
     
     async def initialize(self) -> bool:
         """
@@ -656,17 +741,51 @@ class DatabaseManager:
             
         # 데이터베이스 연결
         if not await self.connection.connect():
+            self.set_disconnection_flag(True) # 초기 연결 실패 시 플래그 설정
             return False
         
+        # DatabaseConnection에 DatabaseManager 참조 전달
+        self.connection.set_db_manager(self)
+
         # 저장소들 생성
         self.sensor_repository = SensorDataRepository(self.connection)
         self.device_repository = DeviceRepository(self.connection)
-        self.alert_repository = AlertRepository(self.connection)
+        self.alert_repository = AlertRepository(self.connection, self)
         
         self._is_initialized = True
         logger.info("데이터베이스 매니저 초기화 완료")
         return True
-    
+
+    def set_disconnection_flag(self, status: bool):
+        """DB 연결 끊김 상태 플래그를 설정합니다."""
+        if status and not self._db_was_disconnected:
+            logger.warning("DB 연결이 끊어진 것으로 감지되었습니다. 이후 DB 쓰기 실패 시 데이터는 백업됩니다.")
+        self._db_was_disconnected = status
+
+    def get_disconnection_flag(self) -> bool:
+        """DB 연결 끊김 상태를 반환합니다."""
+        return self._db_was_disconnected
+
+    async def handle_db_reconnection(self):
+        """DB 재연결 시 호출되어 백업 처리를 트리거합니다."""
+        async with self._backup_processing_lock:
+            # Lock을 확보한 후, 다시 한번 플래그를 체크하여 중복 실행 방지
+            if not self.get_disconnection_flag():
+                return
+
+            logger.info("DB 연결이 복구된 것으로 감지되었습니다. 백업 데이터 처리를 시작합니다.")
+            self.set_disconnection_flag(False) # 플래그를 먼저 리셋하여 루프 방지
+
+            try:
+                # 로그 백업을 먼저 처리하고, 그 다음 데이터 백업 처리
+                await self.process_pending_log_backups()
+                await self.process_pending_backups()
+                logger.info("백업 데이터 처리 완료.")
+            except Exception as e:
+                logger.error(f"백업 데이터 처리 중 오류 발생: {e}")
+                # 처리 실패 시, 다시 플래그를 설정하여 다음 기회에 재시도
+                self.set_disconnection_flag(True)
+
     async def close(self) -> None:
         """데이터베이스 매니저 종료"""
         if self._is_initialized:
@@ -835,6 +954,154 @@ class DatabaseManager:
                     failed_count += 1 # 파일 삭제에 실패했으므로 실패로 간주
             else:
                 logger.error(f"최종 DB 저장 실패: 백업 파일 유지 ({file_name})")
+                failed_count += 1
+        
+        return {'processed': total_files, 'success': success_count, 'failed': failed_count}
+
+    def backup_alerts_to_csv(self, alerts_to_backup: List[AlertData]) -> str:
+        """
+        저장 실패한 알림 데이터를 CSV 파일로 백업합니다.
+        한 세션에서는 하나의 파일에 계속 추가합니다.
+
+        Args:
+            alerts_to_backup: 백업할 알림 데이터 리스트
+
+        Returns:
+            저장된 CSV 파일의 경로. 실패 시 빈 문자열 반환.
+        """
+        if not alerts_to_backup:
+            return ""
+
+        backup_dir = "backup_logs"
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            # 현재 세션에서 사용 중인 백업 파일이 있는지 확인
+            if self._current_log_backup_path and os.path.exists(self._current_log_backup_path):
+                file_path = self._current_log_backup_path
+                write_header = False
+                open_mode = 'a'
+            else:
+                # 새 세션 또는 첫 백업 시 새 파일 생성
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                file_path = os.path.join(backup_dir, f"backup_log_{timestamp}.csv")
+                self._current_log_backup_path = file_path # 현재 세션 파일 경로 저장
+                write_header = True
+                open_mode = 'w'
+
+            header = [
+                'reg_date', 'string_id', 'rsd_id', 'log_type', 'log_title',
+                'log_content', 'channel_no'
+            ]
+
+            with open(file_path, open_mode, newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                if write_header:
+                    writer.writerow(header)
+
+                for alert in alerts_to_backup:
+                    row = [
+                        alert.reg_date.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                        alert.string_id if alert.string_id is not None else '',
+                        alert.rsd_id if alert.rsd_id is not None else '',
+                        alert.log_type,
+                        alert.log_title,
+                        alert.log_content,
+                        alert.channel_no if alert.channel_no is not None else ''
+                    ]
+                    writer.writerow(row)
+            
+            log_action = "추가" if open_mode == 'a' else "생성"
+            logger.info(f"로그 데이터 백업 {log_action} 성공: {len(alerts_to_backup)}개 알림 -> {file_path}")
+            return file_path
+
+        except Exception as e:
+            logger.error(f"로그 CSV 백업 실패: {e}")
+            return ""
+
+
+    def _parse_csv_to_alert_data(self, file_path: str) -> List[AlertData]:
+        """
+        단일 로그 CSV 파일을 파싱하여 AlertData 리스트로 변환합니다.
+        """
+        alerts = []
+        try:
+            with open(file_path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    alerts.append(AlertData(
+                        reg_date=datetime.strptime(row['reg_date'], "%Y-%m-%d %H:%M:%S.%f"),
+                        string_id=int(row['string_id']) if row['string_id'] else None,
+                        rsd_id=int(row['rsd_id']) if row['rsd_id'] else None,
+                        log_type=int(row['log_type']),
+                        log_title=row['log_title'],
+                        log_content=row['log_content'],
+                        channel_no=int(row['channel_no']) if row['channel_no'] else None
+                    ))
+            return alerts
+        except Exception as e:
+            logger.error(f"로그 CSV 파일 파싱 실패 ({os.path.basename(file_path)}): {e}")
+            return []
+
+    async def process_pending_log_backups(self) -> Dict[str, Any]:
+        """
+        'backup_logs' 디렉터리의 모든 CSV 파일을 처리하여 DB에 저장합니다.
+        성공 시 CSV 파일을 삭제하고, 실패 시 그대로 둡니다.
+        """
+        backup_dir = "backup_logs"
+        if not os.path.exists(backup_dir):
+            return {'processed': 0, 'success': 0, 'failed': 0}
+
+        csv_files = [f for f in os.listdir(backup_dir) if f.endswith('.csv')]
+        if not csv_files:
+            return {'processed': 0, 'success': 0, 'failed': 0}
+
+        total_files = len(csv_files)
+        success_count = 0
+        failed_count = 0
+        
+        logger.info(f"DB에 저장되지 않은 로그 백업 파일 {total_files}개를 발견했습니다. 복구를 시작합니다.")
+
+        for file_name in csv_files:
+            file_path = os.path.join(backup_dir, file_name)
+            logger.info(f"로그 파일 처리 중: {file_name}")
+            
+            alerts_to_save = self._parse_csv_to_alert_data(file_path)
+            if not alerts_to_save:
+                logger.warning(f"{file_name} 파싱 결과 데이터가 없어 건너뜁니다.")
+                failed_count += 1
+                continue
+
+            all_saved = True
+            try:
+                # 배치로 한 번에 저장 시도
+                alert_tuples = [
+                    (a.string_id, a.rsd_id, a.log_type, a.log_title, a.log_content, a.reg_date)
+                    for a in alerts_to_save
+                ]
+                query = """
+                INSERT INTO TB_ALERT_LOG3 (
+                    string_id, rsd_id, log_type, log_title, log_content, reg_date
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+                """
+                await self.connection.execute_many(query, alert_tuples)
+            except Exception as e:
+                logger.error(f"백업된 로그 배치 저장 실패 (파일: {file_name}): {e}")
+                all_saved = False
+            
+            if all_saved:
+                try:
+                    os.remove(file_path)
+                    logger.info(f"로그 백업 파일 삭제 완료: {file_name}")
+                    success_count += 1
+                    # 현재 세션 파일이 삭제된 경우, 경로 초기화
+                    if file_path == self._current_log_backup_path:
+                        self._current_log_backup_path = None
+                except OSError as e:
+                    logger.error(f"로그 백업 파일 삭제 실패 ({file_name}): {e}")
+                    failed_count += 1
+            else:
+                logger.error(f"로그 DB 저장 실패: 백업 파일 유지 ({file_name})")
                 failed_count += 1
         
         return {'processed': total_files, 'success': success_count, 'failed': failed_count}

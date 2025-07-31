@@ -524,7 +524,8 @@ class RSDTestManager:
                 await self.alert_repository.save_communication_error_alert(
                     string_id=string_info.string_id,
                     rsd_id=rsd_id,
-                    error_message=f"연결 테스트 실패: {error_message}"
+                    error_message=f"연결 테스트 실패: {error_message}",
+                    event_time=start_time
                 )
             except Exception as e:
                 logger.error(f"테스트 실패 알림 저장 중 오류 발생: {e}")
