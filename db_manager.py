@@ -733,6 +733,112 @@ class DatabaseManager:
             logger.error(f"CSV 백업 실패: {e}")
             return ""
 
+    def _parse_csv_to_sensor_data(self, file_path: str) -> List[RSDSensorData]:
+        """
+        단일 CSV 파일을 파싱하여 RSDSensorData 리스트로 변환합니다.
+        동일한 타임스탬프, string_id, rsd_id를 가진 row들을 하나의 RSDSensorData로 그룹화합니다.
+        """
+        grouped_data = {}
+        try:
+            with open(file_path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # 그룹화를 위한 복합 키 생성
+                    key = (row['timestamp'], int(row['string_id']), int(row['rsd_id']))
+                    
+                    if key not in grouped_data:
+                        grouped_data[key] = {
+                            'string_id': int(row['string_id']),
+                            'rsd_id': int(row['rsd_id']),
+                            'rsd_status': int(row['rsd_status']),
+                            'timestamp': datetime.strptime(row['timestamp'], "%Y-%m-%d %H:%M:%S.%f"),
+                            'channels': []
+                        }
+                    
+                    # 채널 데이터 추가
+                    grouped_data[key]['channels'].append(ChannelData(
+                        channel_no=int(row['channel_no']),
+                        temperature=float(row['temperature']),
+                        current=float(row['current']),
+                        is_arc=(row['is_arc'].lower() == 'true'),
+                        arc_frequency=int(row['arc_frequency']),
+                        arc_count=int(row['arc_count'])
+                    ))
+
+            # 그룹화된 데이터를 RSDSensorData 객체 리스트로 변환
+            sensor_data_list = [
+                RSDSensorData(**data) for data in grouped_data.values()
+            ]
+            return sensor_data_list
+
+        except Exception as e:
+            logger.error(f"CSV 파일 파싱 실패 ({os.path.basename(file_path)}): {e}")
+            return []
+
+    async def process_pending_backups(self) -> Dict[str, Any]:
+        """
+        'backup_data' 디렉터리의 모든 CSV 파일을 처리하여 DB에 저장합니다.
+        성공 시 CSV 파일을 삭제하고, 실패 시 그대로 둡니다.
+        """
+        backup_dir = "backup_data"
+        if not os.path.exists(backup_dir):
+            return {'processed': 0, 'success': 0, 'failed': 0}
+
+        csv_files = [f for f in os.listdir(backup_dir) if f.endswith('.csv')]
+        if not csv_files:
+            return {'processed': 0, 'success': 0, 'failed': 0}
+
+        total_files = len(csv_files)
+        success_count = 0
+        failed_count = 0
+        
+        logger.info(f"DB에 저장되지 않은 백업 파일 {total_files}개를 발견했습니다. 복구를 시작합니다.")
+
+        for file_name in csv_files:
+            file_path = os.path.join(backup_dir, file_name)
+            logger.info(f"파일 처리 중: {file_name}")
+            
+            # 1. CSV 파일 파싱
+            sensor_data_to_save = self._parse_csv_to_sensor_data(file_path)
+            if not sensor_data_to_save:
+                logger.warning(f"{file_name} 파싱 결과 데이터가 없어 건너뜁니다.")
+                failed_count += 1
+                continue
+
+            # 2. DB 저장 시도 (최대 2회)
+            is_saved = False
+            for attempt in range(1, 3): # 1차 시도, 2차 재시도
+                try:
+                    logger.info(f"DB 저장 시도 #{attempt} (대상: {file_name})")
+                    result = await self.sensor_repository.save_sensor_data_batch(sensor_data_to_save)
+                    
+                    if result.get('success_count', 0) > 0:
+                        logger.info(f"파일 DB 저장 성공: {file_name}")
+                        is_saved = True
+                        break # 저장 성공 시 재시도 루프 탈출
+                    else:
+                        logger.warning(f"DB 저장 시도 #{attempt} 실패: 저장된 데이터 0개 ({file_name})")
+
+                except Exception as e:
+                    logger.error(f"DB 저장 시도 #{attempt} 중 예외 발생 ({file_name}): {e}")
+                
+                await asyncio.sleep(1) # 재시도 전 1초 대기
+
+            # 3. 결과에 따른 파일 처리
+            if is_saved:
+                try:
+                    os.remove(file_path)
+                    logger.info(f"백업 파일 삭제 완료: {file_name}")
+                    success_count += 1
+                except OSError as e:
+                    logger.error(f"백업 파일 삭제 실패 ({file_name}): {e}")
+                    failed_count += 1 # 파일 삭제에 실패했으므로 실패로 간주
+            else:
+                logger.error(f"최종 DB 저장 실패: 백업 파일 유지 ({file_name})")
+                failed_count += 1
+        
+        return {'processed': total_files, 'success': success_count, 'failed': failed_count}
+
     def get_sensor_repository(self) -> Optional[SensorDataRepository]:
         """센서 데이터 저장소 반환"""
         if not self._is_initialized:

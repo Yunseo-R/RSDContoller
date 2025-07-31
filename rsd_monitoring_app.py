@@ -7,7 +7,7 @@ PySide6 기반 실시간 센싱 데이터 표시
 import sys
 import asyncio
 import logging
-import time
+import os
 import signal
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
@@ -602,8 +602,6 @@ class MonitoringThread(QThread):
     status_updated = Signal(str)
     error_occurred = Signal(str)
     initialization_progress = Signal(str, str)
-    
-    # 신규 시그널: DB 저장 최종 실패 후 CSV 백업 완료 시 발생
     backup_finished = Signal(str)
     
     def __init__(self, config_manager: ConfigManager):
@@ -632,6 +630,32 @@ class MonitoringThread(QThread):
             self.log_manager = LogManager(config_manager)
             logger.info("LogManager 의존성 주입 완료")
 
+    def run_final_save_blocking(self):
+        """
+        동기 컨텍스트에서 최종 저장 로직을 실행하기 위한 블로킹 메서드.
+        스레드가 시작되어 manager들이 초기화되었다고 가정합니다.
+        """
+        buffer_count = len(self._sensor_data_buffer) if hasattr(self, '_sensor_data_buffer') else 0
+        if buffer_count == 0:
+            return
+
+        # 저장을 위한 의존성(manager)들이 준비되었는지 확인
+        if not all(hasattr(self, mgr) and getattr(self, mgr) for mgr in ['db_manager', 'communication_manager']):
+            if self.log_manager:
+                self.log_manager.error_log("최종저장", "저장에 필요한 관리자 객체가 초기화되지 않아 저장할 수 없습니다.")
+            return
+        
+        if self.log_manager:
+            self.log_manager.operation_log("시스템", f"프로그램 종료 전 최종 데이터 저장 시작. (대상: {buffer_count}개)")
+
+        # 새 이벤트 루프를 사용하여 비동기 저장 실행
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._final_data_save())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
 
     async def _save_data_with_retry_and_backup(self, data_to_save: List[RSDSensorData]):
         """
@@ -1475,6 +1499,10 @@ class RSDMonitoringMainWindow(QMainWindow):
         # ConfigManager 직접 사용
         self.config_manager = ConfigManager()
         
+        # 백업 처리용 DB 매니저 초기화. 실제 연결은 필요할 때 수행합니다.
+        db_config = self.config_manager.get_database_config()
+        self.db_manager = DatabaseManager(db_config)
+
         # String 정보 캐시 (단순화)
         self.string_cache = {}
         
@@ -1687,24 +1715,23 @@ class RSDMonitoringMainWindow(QMainWindow):
         try:
             if self.log_manager:
                 self.log_manager.operation_log("시스템", "최종 정리 및 종료 시작")
-            
+
             if hasattr(self, 'loading_overlay'):
                 self.loading_overlay.hide_loading()
-            
+
             if hasattr(self, 'string_widgets'):
                 self.string_widgets.clear()
-            
+
             if hasattr(self, 'string_cache'):
                 self.string_cache.clear()
-            
+
             if self.log_manager:
                 self.log_manager.operation_log("시스템", "프로그램 종료 완료")
-            
+
         except Exception as e:
             if self.log_manager:
                 self.log_manager.error_log("시스템", f"최종 정리 중 오류: {e}")
         finally:
-            self.close()
             QApplication.quit()
 
     def setup_signals(self):
@@ -2007,33 +2034,44 @@ class RSDMonitoringMainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """윈도우 종료 이벤트를 처리합니다."""
-        # 모니터링 스레드가 실행 중인지 확인
+        # 1. 모니터링 스레드가 실행 중인 경우, 사용자에게 확인 후 안전하게 종료
         if self.monitoring_thread and self.monitoring_thread.isRunning():
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle("종료 확인")
             msg_box.setText("모니터링이 진행중입니다.\n안전한 종료를 위해 모니터링 중단 후 프로그램 종료를 권장합니다.\n프로그램을 계속 종료하시겠습니까?")
             msg_box.setIcon(QMessageBox.Question)
             
-            # 버튼 추가
             exit_button = msg_box.addButton("프로그램 종료", QMessageBox.DestructiveRole)
             confirm_button = msg_box.addButton("취소", QMessageBox.RejectRole)
 
             msg_box.exec()
 
-            # 사용자가 '프로그램 종료' 버튼을 클릭한 경우
             if msg_box.clickedButton() == exit_button:
                 if self.log_manager:
                     self.log_manager.operation_log("시스템", "사용자가 프로그램 강제 종료를 선택했습니다.")
-                # is_exiting 플래그와 함께 모니터링 중지 요청
+                # 기존 로직: 스레드를 안전하게 중지시키고, 스레드의 finally 블록에서 데이터 저장
                 self._request_monitoring_stop(is_exiting=True)
-                # 스레드가 안전하게 종료될 때까지 창이 닫히지 않도록 이벤트를 무시합니다.
-                event.ignore()
+                event.ignore() # 스레드가 종료될 때까지 대기
             else:
-                # '확인'을 누르거나 대화상자를 닫은 경우, 종료를 취소합니다.
-                event.ignore()
+                event.ignore() # 종료 취소
             return
 
-        # 모니터링 중이 아닐 때의 기존 종료 로직
+        # 2. 모니터링은 중지되었지만, 스레드 객체가 남아있고 버퍼에 데이터가 있을 수 있는 경우
+        if self.monitoring_thread and hasattr(self.monitoring_thread, 'run_final_save_blocking'):
+            buffer_count = self.monitoring_thread.get_buffer_status().get('buffer_count', 0)
+            if buffer_count > 0:
+                if self.log_manager:
+                    self.log_manager.operation_log("시스템", f"종료 시 미저장 데이터 {buffer_count}개 발견.")
+                
+                self.loading_overlay.show_loading("데이터 저장 중...", f"남은 데이터 {buffer_count}개를 안전하게 저장합니다.")
+                QApplication.processEvents()
+
+                # 새로 추가한 블로킹 저장 메서드 호출
+                self.monitoring_thread.run_final_save_blocking()
+                
+                self.loading_overlay.hide_loading()
+        
+        # 3. 모든 절차 후 실제 종료
         if self.is_exiting:
             event.accept()
             return
@@ -2041,6 +2079,66 @@ class RSDMonitoringMainWindow(QMainWindow):
         self.is_exiting = True
         self._final_cleanup_and_exit()
         event.accept()
+
+    def check_and_process_backups(self):
+        """
+        프로그램 시작 시, 저장되지 않은 백업 파일이 있는지 확인하고 처리를 묻습니다.
+        이 메서드는 메인 이벤트 루프에서 실행되어야 합니다 (예: main 함수).
+        """
+        try:
+            backup_dir = "backup_data"
+            if not os.path.exists(backup_dir) or not any(f.endswith('.csv') for f in os.listdir(backup_dir)):
+                return # 백업 폴더나 파일이 없으면 조용히 종료
+
+            reply = QMessageBox.question(self, '백업 데이터 복구',
+                                         "데이터베이스에 저장되지 못한 백업 파일이 있습니다.\n"
+                                         "지금 DB에 저장하시겠습니까?",
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+            if reply == QMessageBox.No:
+                QMessageBox.information(self, '알림', '백업 데이터 복구를 취소했습니다.\n'
+                                                    '파일은 다음 실행 시까지 유지됩니다.')
+                return
+
+            # 로딩 오버레이 표시
+            self.loading_overlay.show_loading("백업 데이터 복구 중...",
+                                              "백업된 CSV 파일을 DB에 저장하고 있습니다...")
+            QApplication.processEvents() # UI가 즉시 업데이트되도록 강제
+
+            # 비동기 작업을 실행하기 위한 이벤트 루프 생성 및 실행
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # DB 매니저 초기화 및 백업 처리
+            is_initialized = loop.run_until_complete(self.db_manager.initialize())
+            
+            summary = {'processed': 0, 'success': 0, 'failed': 0}
+            if is_initialized:
+                summary = loop.run_until_complete(self.db_manager.process_pending_backups())
+                loop.run_until_complete(self.db_manager.close()) # 리소스 정리
+            else:
+                summary['failed'] = -1 # 초기화 실패를 의미
+            
+            loop.close()
+            asyncio.set_event_loop(None) # 이벤트 루프 정리
+
+            # 로딩 오버레이 숨김 및 결과 알림
+            self.loading_overlay.hide_loading()
+            
+            if summary['failed'] == -1:
+                 QMessageBox.critical(self, '복구 실패', '데이터베이스에 연결할 수 없어 복구를 진행하지 못했습니다.')
+            elif summary['failed'] > 0:
+                QMessageBox.warning(self, '복구 결과',
+                                    f"총 {summary['processed']}개의 백업 파일 중 {summary['success']}개 성공, "
+                                    f"{summary['failed']}개 실패했습니다.\n"
+                                    "실패한 파일은 그대로 유지되니 관리자에게 문의하세요.")
+            else:
+                QMessageBox.information(self, '복구 성공',
+                                        f"총 {summary['processed']}개의 백업 파일을 모두 데이터베이스에 저장했습니다.")
+        
+        except Exception as e:
+            self.loading_overlay.hide_loading()
+            QMessageBox.critical(self, '오류', f'백업 데이터 처리 중 오류가 발생했습니다: {e}')
 
 # =============================================================================
 # 메인 함수들
@@ -2126,6 +2224,7 @@ def main():
     window = RSDMonitoringMainWindow()
     app.main_window = window
     window.show()
+    window.check_and_process_backups()
     
     print("RSD 모니터링 시스템이 시작되었습니다")
     print("완전 클래스 기반 구조로 효율적인 모니터링을 제공합니다")
