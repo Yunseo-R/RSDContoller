@@ -1112,7 +1112,7 @@ class MonitoringThread(QThread):
         else:
             return "아직 저장 안됨"
 
-
+    
     async def _initialize_system(self) -> bool:
         """시스템 초기화 - 연결 테스트와 실제 통신 분리"""
         try:
@@ -1127,11 +1127,14 @@ class MonitoringThread(QThread):
                 port=self.config_manager.database_port,
                 database=self.config_manager.database_name,
                 username=self.config_manager.database_username,
-                password=self.config_manager.database_password  # 수정된 부분
+                password=self.config_manager.database_password
             )
 
-            # DatabaseManager 사용
+            # DatabaseManager 사용 (내부에서 생성)
             self.db_manager = DatabaseManager(db_config)
+            # DB 재연결 콜백 등록
+            self.db_manager.set_status_callback(self._handle_db_reconnection)
+
             if not await self.db_manager.initialize():
                 return False
 
@@ -1145,7 +1148,6 @@ class MonitoringThread(QThread):
                 "RSD 기기들과의 연결을 테스트하고 있습니다..."
             )
 
-            # StringManager와 RSDManager 초기화
             from set_string import StringManager, RSDManager, RSDTestManager
 
             string_manager = StringManager()
@@ -1153,33 +1155,25 @@ class MonitoringThread(QThread):
             string_manager.set_device_repository(self.db_manager.get_device_repository())
             rsd_manager.set_device_repository(self.db_manager.get_device_repository())
 
-            # 연결 테스트 관리자 초기화 (AlertRepository 주입)
             alert_repo = self.db_manager.get_alert_repository()
             test_manager = RSDTestManager(self.config_manager, alert_repository=alert_repo)
-
-            # 모든 String에 대해 연결 테스트 수행
             test_results = await test_manager.test_all_strings(string_manager, rsd_manager)
 
-            # 테스트 결과에서 성공한 기기들만 추출
             active_strings = []
             active_devices = []
 
             for string_id, string_results in test_results.items():
-                # String 정보 조회
                 string_info = await string_manager.get_string_by_id(string_id)
                 if not string_info:
                     continue
 
-                # 성공한 RSD 목록 추출
                 successful_rsds = []
                 for result in string_results:
                     if result.is_success:
-                        # RSD 정보 조회
                         rsd_info = await rsd_manager.get_rsd_by_id(string_id, result.rsd_id)
                         if rsd_info:
                             successful_rsds.append(rsd_info)
 
-                # 성공한 RSD가 있으면 String 활성화
                 if successful_rsds:
                     active_strings.append(string_info)
                     active_devices.extend(successful_rsds)
@@ -1227,7 +1221,6 @@ class MonitoringThread(QThread):
             error_msg = f"시스템 초기화 실패: {str(e)}"
             if self.log_manager:
                 self.log_manager.error_log("시스템", error_msg)
-            # DB 연결이 성공했다면, 시스템 오류 알림 저장
             if self.db_manager and self.db_manager.is_initialized():
                 alert_repo = self.db_manager.get_alert_repository()
                 if alert_repo:
@@ -1237,6 +1230,21 @@ class MonitoringThread(QThread):
                     )
             return False
 
+    
+    async def _handle_db_reconnection(self):
+        """DB 재연결 시 호출될 콜백 함수. 백업 데이터 처리를 담당합니다."""
+        logger.info("DB 재연결 콜백 수신. 백업된 데이터 처리를 시작합니다.")
+        try:
+            if self.db_manager:
+                if self.db_manager.sensor_repository:
+                    await self.db_manager.sensor_repository.process_pending_backups()
+                if self.db_manager.alert_repository:
+                    await self.db_manager.alert_repository.process_pending_log_backups()
+                logger.info("백업 데이터 처리 완료.")
+            else:
+                logger.warning("DB 매니저가 초기화되지 않아 백업을 처리할 수 없습니다.")
+        except Exception as e:
+            logger.error(f"백업 데이터 처리 중 오류 발생: {e}")
 
     async def _cleanup_resources(self):
         """리소스 정리 작업 - 향상된 정리 로직"""
@@ -1855,25 +1863,23 @@ class RSDMonitoringMainWindow(QMainWindow):
         if LOGGING_AVAILABLE and hasattr(self, 'log_manager'):
             self.log_manager.operation_log("UI", "UI 상태 초기화 시작")
 
+    
     def start_monitoring(self):
         """모니터링 시작"""
         if self.monitoring_thread and self.monitoring_thread.isRunning():
             return
         
-        # UI 상태 초기화
         self._initialize_ui_state()
         
         if LOGGING_AVAILABLE and hasattr(self, 'log_manager'):
             self.log_manager.operation_log("모니터링", "모니터링 시작 요청 - 시스템 초기화 시작")
         
-        # 모니터링 스레드 시작 - ConfigManager 직접 전달
         self.monitoring_thread = MonitoringThread(self.config_manager)
         self.monitoring_thread.data_updated.connect(self.update_rsd_data)
         self.monitoring_thread.single_rsd_updated.connect(self.update_single_rsd_data)
         self.monitoring_thread.status_updated.connect(self.update_status)
         self.monitoring_thread.error_occurred.connect(self.show_error)
         self.monitoring_thread.initialization_progress.connect(self.update_initialization_progress)
-        # 신규 시그널 연결
         self.monitoring_thread.backup_finished.connect(self._on_backup_finished)
         self.monitoring_thread.start()
         

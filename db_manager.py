@@ -81,24 +81,23 @@ class AlertData:
 class DatabaseConnection:
     """데이터베이스 연결 관리자"""
     
-    def __init__(self, config: DatabaseConfig, db_reconnected_event: asyncio.Event):
+    def __init__(self, config: DatabaseConfig, status_callback: Optional[callable] = None):
         """
         데이터베이스 연결 초기화
         
         Args:
             config: 데이터베이스 설정
-            db_reconnected_event: DB 재연결 시그널링을 위한 asyncio.Event
+            status_callback: DB 연결 상태 변경 시 호출될 콜백 함수
         """
         self.config = config
         self._pool: Optional[asyncpg.Pool] = None
         self.is_connected = False
-        self._db_reconnected_event = db_reconnected_event
-        self._db_was_disconnected = False
+        self._status_callback = status_callback
+        self._health_check_task: Optional[asyncio.Task] = None
      
-
     async def connect(self) -> bool:
         """
-        데이터베이스 연결 풀 생성
+        데이터베이스 연결 풀 생성 및 상태 확인 태스크 시작
         
         Returns:
             연결 성공 여부
@@ -117,21 +116,58 @@ class DatabaseConnection:
             
             self.is_connected = True
             logger.info(f"데이터베이스 연결 성공: {self.config.host}:{self.config.port}/{self.config.database}")
+            
+            # 상태 확인 태스크 시작 (이름 충돌 오류 수정)
+            if not self._health_check_task or self._health_check_task.done():
+                self._health_check_task = asyncio.create_task(self._health_check_loop())
+                
             return True
             
         except Exception as e:
             logger.error(f"데이터베이스 연결 실패: {e}")
             self.is_connected = False
-            return False
-    
+            return False    
+
     async def disconnect(self) -> None:
-        """데이터베이스 연결 종료"""
+        """데이터베이스 연결 및 상태 확인 태스크 종료"""
+        # 상태 확인 태스크 종료
+        if self._health_check_task and not self._health_check_task.done():
+            self._health_check_task.cancel()
+            try:
+                await self._health_check_task
+            except asyncio.CancelledError:
+                pass  # 정상적인 종료
+                
         if self._pool:
             await self._pool.close()
             self._pool = None
         self.is_connected = False
         logger.info("데이터베이스 연결 종료")
-    
+
+    async def _health_check_loop(self):
+        """주기적으로 DB 연결 상태를 확인하고, 변경 시 콜백을 호출하는 태스크"""
+        last_status = self.is_connected
+        while True:
+            try:
+                await asyncio.sleep(5)  # 5초마다 상태 확인
+                
+                current_status = await self.test_connection()
+                
+                if current_status != last_status:
+                    logger.info(f"DB 연결 상태 변경 감지: {last_status} -> {current_status}")
+                    self.is_connected = current_status
+                    if self._status_callback:
+                        # 연결이 끊겼다가 다시 연결된 경우 콜백 호출
+                        if current_status and not last_status:
+                            logger.info("DB 재연결 감지. 상태 콜백을 호출합니다.")
+                            asyncio.create_task(self._status_callback())
+                    last_status = current_status
+            except asyncio.CancelledError:
+                logger.info("상태 확인 태스크가 종료되었습니다.")
+                break
+            except Exception as e:
+                logger.error(f"DB 상태 확인 중 오류 발생: {e}")
+
     async def test_connection(self) -> bool:
         """연결 테스트"""
         try:
@@ -166,9 +202,10 @@ class DatabaseConnection:
             logger.error(f"쿼리 실행 실패: {e}")
             raise
     
+    
     async def execute_command(self, query: str, *args) -> str:
         """
-        INSERT/UPDATE/DELETE 쿼리 실행 (연결 상태 감지 로직 추가)
+        INSERT/UPDATE/DELETE 쿼리 실행
         
         Args:
             query: SQL 쿼리
@@ -183,24 +220,21 @@ class DatabaseConnection:
             
             async with self._pool.acquire() as conn:
                 result = await conn.execute(query, *args)
-                # 쓰기 성공 시, '연결 끊김' 상태였다면 복구 신호 전송
-                if self._db_was_disconnected:
-                    self._db_reconnected_event.set()
-                    self._db_was_disconnected = False # 플래그 리셋
                 return result
                 
         except (OSError, asyncpg.exceptions.ConnectionDoesNotExistError, ConnectionError) as e:
-            # 연결 오류 발생 시 '연결 끊김' 플래그 설정
-            self._db_was_disconnected = True
+            # 연결 오류 발생 시 is_connected 플래그만 업데이트
+            self.is_connected = False
             logger.error(f"명령 실행 실패 (연결 오류 감지): {e}")
             raise
         except Exception as e:
             logger.error(f"명령 실행 실패: {e}")
             raise
+
     
     async def execute_many(self, query: str, args_list: List[tuple]) -> None:
         """
-        배치 명령 실행 (연결 상태 감지 로직 추가)
+        배치 명령 실행
         
         Args:
             query: SQL 쿼리
@@ -212,14 +246,10 @@ class DatabaseConnection:
 
             async with self._pool.acquire() as conn:
                 await conn.executemany(query, args_list)
-                # 배치 쓰기 성공 시, '연결 끊김' 상태였다면 복구 신호 전송
-                if self._db_was_disconnected:
-                    self._db_reconnected_event.set()
-                    self._db_was_disconnected = False # 플래그 리셋
 
         except (OSError, asyncpg.exceptions.ConnectionDoesNotExistError, ConnectionError) as e:
-            # 연결 오류 발생 시 '연결 끊김' 플래그 설정
-            self._db_was_disconnected = True
+            # 연결 오류 발생 시 is_connected 플래그만 업데이트
+            self.is_connected = False
             logger.error(f"배치 명령 실행 실패 (연결 오류 감지): {e}")
             raise
         except Exception as e:
@@ -1005,8 +1035,9 @@ class DatabaseManager:
             config: 데이터베이스 설정
         """
         self.config = config
-        self._db_reconnected_event = asyncio.Event()
-        self.connection = DatabaseConnection(config, self._db_reconnected_event)
+        self._status_callback: Optional[callable] = None
+        # 내부 핸들러를 DatabaseConnection에 전달
+        self.connection = DatabaseConnection(config, self._handle_reconnection)
         
         # 저장소들 (연결 후에 생성됨)
         self.sensor_repository: Optional[SensorDataRepository] = None
@@ -1014,9 +1045,8 @@ class DatabaseManager:
         self.alert_repository: Optional[AlertRepository] = None
         
         self._is_initialized = False
-        self._current_log_backup_path: Optional[str] = None
         self._backup_processing_lock = asyncio.Lock()
-        self._backup_task: Optional[asyncio.Task] = None 
+
     
     async def initialize(self) -> bool:
         """
@@ -1031,17 +1061,13 @@ class DatabaseManager:
             
         # 데이터베이스 연결
         if not await self.connection.connect():
-            self.connection._db_was_disconnected = True # 초기 연결 실패 시 플래그 설정
             return False
 
-        # 저장소들 생성 (AlertRepository 생성 시 backup_function 인자 제거)
+        # 저장소들 생성
         self.sensor_repository = SensorDataRepository(self.connection)
         self.device_repository = DeviceRepository(self.connection)
         self.alert_repository = AlertRepository(self.connection)
         
-        # 백업 처리 백그라운드 태스크 시작
-        self._backup_task = asyncio.create_task(self._backup_processing_task())
-
         self._is_initialized = True
         logger.info("데이터베이스 매니저 초기화 완료")
         return True
@@ -1056,48 +1082,9 @@ class DatabaseManager:
         """DB 연결 끊김 상태를 반환합니다."""
         return self._db_was_disconnected
 
-    async def _backup_processing_task(self):
-        """
-        DB 재연결 이벤트를 감지하여 백업 데이터 처리를 실행하는 백그라운드 태스크
-        """
-        while True:
-            try:
-                await self._db_reconnected_event.wait() # 이벤트 발생 대기
-                
-                async with self._backup_processing_lock:
-                    logger.info("DB 재연결 신호 감지. 백업 데이터 처리를 시작합니다.")
-                    
-                    try:
-                        # 각 Repository의 백업 처리 메서드를 직접 호출
-                        if self.alert_repository:
-                            await self.alert_repository.process_pending_log_backups()
-                        
-                        if self.sensor_repository:
-                            await self.sensor_repository.process_pending_backups()
-
-                        logger.info("백업 데이터 처리 완료.")
-                    except Exception as e:
-                        logger.error(f"백업 데이터 처리 중 오류 발생: {e}")
-                    finally:
-                        self._db_reconnected_event.clear() # 다음 신호를 위해 이벤트 초기화
-
-            except asyncio.CancelledError:
-                logger.info("백업 처리 태스크가 종료됩니다.")
-                break
-            except Exception as e:
-                logger.error(f"백업 처리 태스크에서 예상치 못한 오류 발생: {e}")
-                await asyncio.sleep(5)
-
+    
     async def close(self) -> None:
         """데이터베이스 매니저 종료"""
-        # 백업 태스크 먼저 취소
-        if self._backup_task and not self._backup_task.done():
-            self._backup_task.cancel()
-            try:
-                await self._backup_task
-            except asyncio.CancelledError:
-                pass
-        
         if self._is_initialized:
             await self.connection.disconnect()
             self.sensor_repository = None
@@ -1105,6 +1092,27 @@ class DatabaseManager:
             self.alert_repository = None
             self._is_initialized = False
             logger.info("데이터베이스 매니저 종료")
+
+    
+    def set_status_callback(self, callback: callable):
+        """
+        DB 재연결 시 실행될 콜백 함수를 등록합니다.
+        
+        Args:
+            callback: 재연결 시 실행할 비동기 콜백 함수
+        """
+        self._status_callback = callback
+        logger.info("DB 재연결 콜백 함수가 등록되었습니다.")
+
+   
+    async def _handle_reconnection(self):
+        """
+        DatabaseConnection으로부터 재연결 신호를 받았을 때 처리하는 내부 메서드
+        등록된 외부 콜백을 호출합니다.
+        """
+        if self._status_callback:
+            # 등록된 외부 콜백이 있으면 비동기적으로 실행
+            asyncio.create_task(self._status_callback())
 
     # =========================================================================
     # 신규 메서드: CSV 백업
