@@ -341,11 +341,172 @@ class SensorDataRepository:
             
         except Exception as e:
             logger.error(f"배치 센서 데이터 저장 실패: {e}")
+            # 실패 시 CSV 백업 로직 호출
+            self.backup_data_to_csv(sensor_data_list)
             return {
                 'total_count': len(sensor_data_list),
                 'success_count': 0,
                 'error_count': len(sensor_data_list)
             }
+
+    def backup_data_to_csv(self, sensor_data_list: List[RSDSensorData]) -> str:
+        """
+        저장 실패한 센서 데이터를 CSV 파일로 백업합니다.
+
+        Args:
+            sensor_data_list: 백업할 센서 데이터 리스트
+
+        Returns:
+            저장된 CSV 파일의 경로. 실패 시 빈 문자열 반환.
+        """
+        if not sensor_data_list:
+            return ""
+
+        backup_dir = "backup_data"
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            file_path = os.path.join(backup_dir, f"backup_{timestamp}.csv")
+
+            header = [
+                'timestamp', 'string_id', 'rsd_id', 'channel_no', 
+                'temperature', 'current', 'is_arc', 'arc_frequency', 
+                'arc_count', 'rsd_status'
+            ]
+
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+
+                for data in sensor_data_list:
+                    for channel in data.channels:
+                        row = [
+                            data.timestamp.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                            data.string_id,
+                            data.rsd_id,
+                            channel.channel_no,
+                            channel.temperature,
+                            channel.current,
+                            channel.is_arc,
+                            channel.arc_frequency,
+                            channel.arc_count,
+                            data.rsd_status
+                        ]
+                        writer.writerow(row)
+
+            logger.info(f"데이터 백업 성공: {len(sensor_data_list)}개 RSD 데이터 -> {file_path}")
+            return file_path
+
+        except Exception as e:
+            logger.error(f"CSV 백업 실패: {e}")
+            return ""
+
+    def _parse_csv_to_sensor_data(self, file_path: str) -> List[RSDSensorData]:
+        """
+        단일 CSV 파일을 파싱하여 RSDSensorData 리스트로 변환합니다.
+        동일한 타임스탬프, string_id, rsd_id를 가진 row들을 하나의 RSDSensorData로 그룹화합니다.
+        """
+        grouped_data = {}
+        try:
+            with open(file_path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # 그룹화를 위한 복합 키 생성
+                    key = (row['timestamp'], int(row['string_id']), int(row['rsd_id']))
+
+                    if key not in grouped_data:
+                        grouped_data[key] = {
+                            'string_id': int(row['string_id']),
+                            'rsd_id': int(row['rsd_id']),
+                            'rsd_status': int(row['rsd_status']),
+                            'timestamp': datetime.strptime(row['timestamp'], "%Y-%m-%d %H:%M:%S.%f"),
+                            'channels': []
+                        }
+
+                    # 채널 데이터 추가
+                    grouped_data[key]['channels'].append(ChannelData(
+                        channel_no=int(row['channel_no']),
+                        temperature=float(row['temperature']),
+                        current=float(row['current']),
+                        is_arc=(row['is_arc'].lower() == 'true'),
+                        arc_frequency=int(row['arc_frequency']),
+                        arc_count=int(row['arc_count'])
+                    ))
+
+            # 그룹화된 데이터를 RSDSensorData 객체 리스트로 변환
+            sensor_data_list = [
+                RSDSensorData(**data) for data in grouped_data.values()
+            ]
+            return sensor_data_list
+
+        except Exception as e:
+            logger.error(f"CSV 파일 파싱 실패 ({os.path.basename(file_path)}): {e}")
+            return []
+
+    async def process_pending_backups(self) -> Dict[str, Any]:
+        """
+        'backup_data' 디렉터리의 모든 CSV 파일을 처리하여 DB에 저장합니다.
+        성공 시 CSV 파일을 삭제하고, 실패 시 그대로 둡니다.
+        """
+        backup_dir = "backup_data"
+        if not os.path.exists(backup_dir):
+            return {'processed': 0, 'success': 0, 'failed': 0}
+
+        csv_files = [f for f in os.listdir(backup_dir) if f.endswith('.csv')]
+        if not csv_files:
+            return {'processed': 0, 'success': 0, 'failed': 0}
+
+        total_files = len(csv_files)
+        success_count = 0
+        failed_count = 0
+
+        logger.info(f"DB에 저장되지 않은 백업 파일 {total_files}개를 발견했습니다. 복구를 시작합니다.")
+
+        for file_name in csv_files:
+            file_path = os.path.join(backup_dir, file_name)
+            logger.info(f"파일 처리 중: {file_name}")
+
+            # 1. CSV 파일 파싱
+            sensor_data_to_save = self._parse_csv_to_sensor_data(file_path)
+            if not sensor_data_to_save:
+                logger.warning(f"{file_name} 파싱 결과 데이터가 없어 건너뜁니다.")
+                failed_count += 1
+                continue
+
+            # 2. DB 저장 시도 (최대 2회)
+            is_saved = False
+            for attempt in range(1, 3): # 1차 시도, 2차 재시도
+                try:
+                    logger.info(f"DB 저장 시도 #{attempt} (대상: {file_name})")
+                    result = await self.save_sensor_data_batch(sensor_data_to_save)
+
+                    if result.get('success_count', 0) > 0:
+                        logger.info(f"파일 DB 저장 성공: {file_name}")
+                        is_saved = True
+                        break # 저장 성공 시 재시도 루프 탈출
+                    else:
+                        logger.warning(f"DB 저장 시도 #{attempt} 실패: 저장된 데이터 0개 ({file_name})")
+
+                except Exception as e:
+                    logger.error(f"DB 저장 시도 #{attempt} 중 예외 발생 ({file_name}): {e}")
+
+                await asyncio.sleep(1) # 재시도 전 1초 대기
+
+            # 3. 결과에 따른 파일 처리
+            if is_saved:
+                try:
+                    os.remove(file_path)
+                    logger.info(f"백업 파일 삭제 완료: {file_name}")
+                    success_count += 1
+                except OSError as e:
+                    logger.error(f"백업 파일 삭제 실패 ({file_name}): {e}")
+                    failed_count += 1 # 파일 삭제에 실패했으므로 실패로 간주
+            else:
+                logger.error(f"최종 DB 저장 실패: 백업 파일 유지 ({file_name})")
+                failed_count += 1
+
+        return {'processed': total_files, 'success': success_count, 'failed': failed_count}
 
 
 # =============================================================================
@@ -506,16 +667,15 @@ class DeviceRepository:
 class AlertRepository:
     """알림 저장소"""
     
-    def __init__(self, connection: DatabaseConnection, backup_function: callable):
+    def __init__(self, connection: DatabaseConnection):
         """
         알림 저장소 초기화
         
         Args:
             connection: 데이터베이스 연결
-            backup_function: 알림 데이터를 백업하는 함수
         """
         self.connection = connection
-        self.backup_function = backup_function
+        self._current_log_backup_path: Optional[str] = None
     
     async def _attempt_save_alert(self, alert: AlertData) -> None:
         """
@@ -536,10 +696,9 @@ class AlertRepository:
             alert.reg_date
         )
 
-    
     async def save_alert(self, string_id: Optional[int], rsd_id: Optional[int], log_type: int,
-                        description: str, channel_no: Optional[int] = None,
-                        event_time: Optional[datetime] = None) -> bool:
+                    description: str, channel_no: Optional[int] = None,
+                    event_time: Optional[datetime] = None) -> bool:
         """
         알림 저장 (재시도, 백업, 시간 지정 로직 추가)
         
@@ -588,8 +747,8 @@ class AlertRepository:
         
         # 3. CSV 백업
         try:
-            # 주입받은 백업 함수 사용
-            file_path = self.backup_function([alert_data])
+            # 자체 백업 함수를 사용하도록 수정
+            file_path = self.backup_alerts_to_csv([alert_data])
             if file_path:
                 logger.info(f"알림 데이터 백업 성공 -> {file_path}")
                 return True
@@ -599,7 +758,7 @@ class AlertRepository:
         except Exception as e:
             logger.error(f"알림 데이터 CSV 백업 중 예외 발생: {e}")
             return False
-
+    
     async def save_arc_alert(self, string_id: int, rsd_id: int, channel_no: int, 
                         arc_frequency: int, arc_count: int,
                         event_time: Optional[datetime] = None) -> bool:
@@ -620,25 +779,7 @@ class AlertRepository:
         description = f"아크 발생 감지 - CH{channel_no} ({arc_frequency} KHz / {arc_count}회)"
         return await self.save_alert(string_id, rsd_id, 1, description, channel_no, event_time=event_time)
 
-    async def save_communication_error_alert(self, string_id: int, rsd_id: int, 
-                                        error_message: str,
-                                        event_time: Optional[datetime] = None) -> bool:
-        """
-        통신 오류 알림 저장 (이벤트 시간 전달 기능 추가)
         
-        Args:
-            string_id: String ID
-            rsd_id: RSD ID
-            error_message: 오류 메시지
-            event_time: 이벤트 발생 시간
-            
-        Returns:
-            저장 성공 여부
-        """
-        description = f"통신 오류: {error_message}"
-        return await self.save_alert(string_id, rsd_id, 2, description, event_time=event_time)
-
-    
     async def get_recent_alerts(self, limit: int = 100) -> List[Dict[str, Any]]:
         """
         최근 알림 목록 조회
@@ -663,22 +804,23 @@ class AlertRepository:
             logger.error(f"최근 알림 조회 실패: {e}")
             return []
         
-
     async def save_communication_error_alert(self, string_id: int, rsd_id: int, 
-                                           error_message: str) -> bool:
+                                        error_message: str,
+                                        event_time: Optional[datetime] = None) -> bool:
         """
-        통신 오류 알림 저장
+        통신 오류 알림 저장 (이벤트 시간 전달 기능 추가)
         
         Args:
             string_id: String ID
             rsd_id: RSD ID
             error_message: 오류 메시지
+            event_time: 이벤트 발생 시간
             
         Returns:
             저장 성공 여부
         """
         description = f"통신 오류: {error_message}"
-        return await self.save_alert(string_id, rsd_id, 2, description)
+        return await self.save_alert(string_id, rsd_id, 2, description, event_time=event_time)
     
     async def save_system_error_alert(self, component: str, error_message: str, 
                                 string_id: Optional[int] = None, 
@@ -701,6 +843,152 @@ class AlertRepository:
         log_type = 3  # 시스템 오류
         return await self.save_alert(string_id, rsd_id, log_type, description, event_time=event_time)
 
+    def backup_alerts_to_csv(self, alerts_to_backup: List[AlertData]) -> str:
+        """
+        저장 실패한 알림 데이터를 CSV 파일로 백업
+        한 세션에서는 하나의 파일에 계속 추가
+
+        Args:
+            alerts_to_backup: 백업할 알림 데이터 리스트
+
+        Returns:
+            저장된 CSV 파일의 경로. 실패 시 빈 문자열 반환.
+        """
+        if not alerts_to_backup:
+            return ""
+
+        backup_dir = "backup_logs"
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+
+            # 현재 세션에서 사용 중인 백업 파일이 있는지 확인
+            if self._current_log_backup_path and os.path.exists(self._current_log_backup_path):
+                file_path = self._current_log_backup_path
+                write_header = False
+                open_mode = 'a'
+            else:
+                # 새 세션 또는 첫 백업 시 새 파일 생성
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                file_path = os.path.join(backup_dir, f"backup_log_{timestamp}.csv")
+                self._current_log_backup_path = file_path # 현재 세션 파일 경로 저장
+                write_header = True
+                open_mode = 'w'
+
+            header = [
+                'reg_date', 'string_id', 'rsd_id', 'log_type', 'log_title',
+                'log_content', 'channel_no'
+            ]
+
+            with open(file_path, open_mode, newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                if write_header:
+                    writer.writerow(header)
+
+                for alert in alerts_to_backup:
+                    row = [
+                        alert.reg_date.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                        alert.string_id if alert.string_id is not None else '',
+                        alert.rsd_id if alert.rsd_id is not None else '',
+                        alert.log_type,
+                        alert.log_title,
+                        alert.log_content,
+                        alert.channel_no if alert.channel_no is not None else ''
+                    ]
+                    writer.writerow(row)
+
+            log_action = "추가" if open_mode == 'a' else "생성"
+            logger.info(f"로그 데이터 백업 {log_action} 성공: {len(alerts_to_backup)}개 알림 -> {file_path}")
+            return file_path
+
+        except Exception as e:
+            logger.error(f"로그 CSV 백업 실패: {e}")
+            return ""
+
+    def _parse_csv_to_alert_data(self, file_path: str) -> List[AlertData]:
+        """
+        단일 로그 CSV 파일을 파싱하여 AlertData 리스트로 변환합니다.
+        """
+        alerts = []
+        try:
+            with open(file_path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    alerts.append(AlertData(
+                        reg_date=datetime.strptime(row['reg_date'], "%Y-%m-%d %H:%M:%S.%f"),
+                        string_id=int(row['string_id']) if row['string_id'] else None,
+                        rsd_id=int(row['rsd_id']) if row['rsd_id'] else None,
+                        log_type=int(row['log_type']),
+                        log_title=row['log_title'],
+                        log_content=row['log_content'],
+                        channel_no=int(row['channel_no']) if row['channel_no'] else None
+                    ))
+            return alerts
+        except Exception as e:
+            logger.error(f"로그 CSV 파일 파싱 실패 ({os.path.basename(file_path)}): {e}")
+            return []
+
+    async def process_pending_log_backups(self) -> Dict[str, Any]:
+        """
+        'backup_logs' 디렉터리의 모든 CSV 파일을 처리하여 DB에 저장합니다.
+        성공 시 CSV 파일을 삭제하고, 실패 시 그대로 둡니다.
+        """
+        backup_dir = "backup_logs"
+        if not os.path.exists(backup_dir):
+            return {'processed': 0, 'success': 0, 'failed': 0}
+
+        csv_files = [f for f in os.listdir(backup_dir) if f.endswith('.csv')]
+        if not csv_files:
+            return {'processed': 0, 'success': 0, 'failed': 0}
+
+        total_files = len(csv_files)
+        success_count = 0
+        failed_count = 0
+
+        logger.info(f"DB에 저장되지 않은 로그 백업 파일 {total_files}개를 발견했습니다. 복구를 시작합니다.")
+
+        for file_name in csv_files:
+            file_path = os.path.join(backup_dir, file_name)
+            logger.info(f"로그 파일 처리 중: {file_name}")
+
+            alerts_to_save = self._parse_csv_to_alert_data(file_path)
+            if not alerts_to_save:
+                logger.warning(f"{file_name} 파싱 결과 데이터가 없어 건너뜁니다.")
+                failed_count += 1
+                continue
+
+            all_saved = True
+            try:
+                # 배치로 한 번에 저장 시도
+                alert_tuples = [
+                    (a.string_id, a.rsd_id, a.log_type, a.log_title, a.log_content, a.reg_date)
+                    for a in alerts_to_save
+                ]
+                query = """
+                INSERT INTO TB_ALERT_LOG3 (
+                    string_id, rsd_id, log_type, log_title, log_content, reg_date
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+                """
+                await self.connection.execute_many(query, alert_tuples)
+            except Exception as e:
+                logger.error(f"백업된 로그 배치 저장 실패 (파일: {file_name}): {e}")
+                all_saved = False
+
+            if all_saved:
+                try:
+                    os.remove(file_path)
+                    logger.info(f"로그 백업 파일 삭제 완료: {file_name}")
+                    success_count += 1
+                    # 현재 세션 파일이 삭제된 경우, 경로 초기화
+                    if file_path == self._current_log_backup_path:
+                        self._current_log_backup_path = None
+                except OSError as e:
+                    logger.error(f"로그 백업 파일 삭제 실패 ({file_name}): {e}")
+                    failed_count += 1
+            else:
+                logger.error(f"로그 DB 저장 실패: 백업 파일 유지 ({file_name})")
+                failed_count += 1
+
+        return {'processed': total_files, 'success': success_count, 'failed': failed_count}
 
 # =============================================================================
 # 데이터베이스 매니저
@@ -746,10 +1034,10 @@ class DatabaseManager:
             self.connection._db_was_disconnected = True # 초기 연결 실패 시 플래그 설정
             return False
 
-        # 저장소들 생성 (AlertRepository 생성 시 함수 주입)
+        # 저장소들 생성 (AlertRepository 생성 시 backup_function 인자 제거)
         self.sensor_repository = SensorDataRepository(self.connection)
         self.device_repository = DeviceRepository(self.connection)
-        self.alert_repository = AlertRepository(self.connection, self.backup_alerts_to_csv)
+        self.alert_repository = AlertRepository(self.connection)
         
         # 백업 처리 백그라운드 태스크 시작
         self._backup_task = asyncio.create_task(self._backup_processing_task())
@@ -780,9 +1068,13 @@ class DatabaseManager:
                     logger.info("DB 재연결 신호 감지. 백업 데이터 처리를 시작합니다.")
                     
                     try:
-                        # 로그 백업을 먼저 처리하고, 그 다음 데이터 백업 처리
-                        await self.process_pending_log_backups()
-                        await self.process_pending_backups()
+                        # 각 Repository의 백업 처리 메서드를 직접 호출
+                        if self.alert_repository:
+                            await self.alert_repository.process_pending_log_backups()
+                        
+                        if self.sensor_repository:
+                            await self.sensor_repository.process_pending_backups()
+
                         logger.info("백업 데이터 처리 완료.")
                     except Exception as e:
                         logger.error(f"백업 데이터 처리 중 오류 발생: {e}")
@@ -817,313 +1109,8 @@ class DatabaseManager:
     # =========================================================================
     # 신규 메서드: CSV 백업
     # =========================================================================
-    def backup_data_to_csv(self, sensor_data_list: List[RSDSensorData]) -> str:
-        """
-        저장 실패한 센서 데이터를 CSV 파일로 백업합니다.
-
-        Args:
-            sensor_data_list: 백업할 센서 데이터 리스트
-
-        Returns:
-            저장된 CSV 파일의 경로. 실패 시 빈 문자열 반환.
-        """
-        if not sensor_data_list:
-            return ""
-
-        backup_dir = "backup_data"
-        try:
-            os.makedirs(backup_dir, exist_ok=True)
-            
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            file_path = os.path.join(backup_dir, f"backup_{timestamp}.csv")
-
-            header = [
-                'timestamp', 'string_id', 'rsd_id', 'channel_no', 
-                'temperature', 'current', 'is_arc', 'arc_frequency', 
-                'arc_count', 'rsd_status'
-            ]
-
-            with open(file_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(header)
-
-                for data in sensor_data_list:
-                    for channel in data.channels:
-                        row = [
-                            data.timestamp.strftime("%Y-%m-%d %H:%M:%S.%f"),
-                            data.string_id,
-                            data.rsd_id,
-                            channel.channel_no,
-                            channel.temperature,
-                            channel.current,
-                            channel.is_arc,
-                            channel.arc_frequency,
-                            channel.arc_count,
-                            data.rsd_status
-                        ]
-                        writer.writerow(row)
-            
-            logger.info(f"데이터 백업 성공: {len(sensor_data_list)}개 RSD 데이터 -> {file_path}")
-            return file_path
-
-        except Exception as e:
-            logger.error(f"CSV 백업 실패: {e}")
-            return ""
-
-    def _parse_csv_to_sensor_data(self, file_path: str) -> List[RSDSensorData]:
-        """
-        단일 CSV 파일을 파싱하여 RSDSensorData 리스트로 변환합니다.
-        동일한 타임스탬프, string_id, rsd_id를 가진 row들을 하나의 RSDSensorData로 그룹화합니다.
-        """
-        grouped_data = {}
-        try:
-            with open(file_path, 'r', newline='', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    # 그룹화를 위한 복합 키 생성
-                    key = (row['timestamp'], int(row['string_id']), int(row['rsd_id']))
-                    
-                    if key not in grouped_data:
-                        grouped_data[key] = {
-                            'string_id': int(row['string_id']),
-                            'rsd_id': int(row['rsd_id']),
-                            'rsd_status': int(row['rsd_status']),
-                            'timestamp': datetime.strptime(row['timestamp'], "%Y-%m-%d %H:%M:%S.%f"),
-                            'channels': []
-                        }
-                    
-                    # 채널 데이터 추가
-                    grouped_data[key]['channels'].append(ChannelData(
-                        channel_no=int(row['channel_no']),
-                        temperature=float(row['temperature']),
-                        current=float(row['current']),
-                        is_arc=(row['is_arc'].lower() == 'true'),
-                        arc_frequency=int(row['arc_frequency']),
-                        arc_count=int(row['arc_count'])
-                    ))
-
-            # 그룹화된 데이터를 RSDSensorData 객체 리스트로 변환
-            sensor_data_list = [
-                RSDSensorData(**data) for data in grouped_data.values()
-            ]
-            return sensor_data_list
-
-        except Exception as e:
-            logger.error(f"CSV 파일 파싱 실패 ({os.path.basename(file_path)}): {e}")
-            return []
-
-    async def process_pending_backups(self) -> Dict[str, Any]:
-        """
-        'backup_data' 디렉터리의 모든 CSV 파일을 처리하여 DB에 저장합니다.
-        성공 시 CSV 파일을 삭제하고, 실패 시 그대로 둡니다.
-        """
-        backup_dir = "backup_data"
-        if not os.path.exists(backup_dir):
-            return {'processed': 0, 'success': 0, 'failed': 0}
-
-        csv_files = [f for f in os.listdir(backup_dir) if f.endswith('.csv')]
-        if not csv_files:
-            return {'processed': 0, 'success': 0, 'failed': 0}
-
-        total_files = len(csv_files)
-        success_count = 0
-        failed_count = 0
-        
-        logger.info(f"DB에 저장되지 않은 백업 파일 {total_files}개를 발견했습니다. 복구를 시작합니다.")
-
-        for file_name in csv_files:
-            file_path = os.path.join(backup_dir, file_name)
-            logger.info(f"파일 처리 중: {file_name}")
-            
-            # 1. CSV 파일 파싱
-            sensor_data_to_save = self._parse_csv_to_sensor_data(file_path)
-            if not sensor_data_to_save:
-                logger.warning(f"{file_name} 파싱 결과 데이터가 없어 건너뜁니다.")
-                failed_count += 1
-                continue
-
-            # 2. DB 저장 시도 (최대 2회)
-            is_saved = False
-            for attempt in range(1, 3): # 1차 시도, 2차 재시도
-                try:
-                    logger.info(f"DB 저장 시도 #{attempt} (대상: {file_name})")
-                    result = await self.sensor_repository.save_sensor_data_batch(sensor_data_to_save)
-                    
-                    if result.get('success_count', 0) > 0:
-                        logger.info(f"파일 DB 저장 성공: {file_name}")
-                        is_saved = True
-                        break # 저장 성공 시 재시도 루프 탈출
-                    else:
-                        logger.warning(f"DB 저장 시도 #{attempt} 실패: 저장된 데이터 0개 ({file_name})")
-
-                except Exception as e:
-                    logger.error(f"DB 저장 시도 #{attempt} 중 예외 발생 ({file_name}): {e}")
-                
-                await asyncio.sleep(1) # 재시도 전 1초 대기
-
-            # 3. 결과에 따른 파일 처리
-            if is_saved:
-                try:
-                    os.remove(file_path)
-                    logger.info(f"백업 파일 삭제 완료: {file_name}")
-                    success_count += 1
-                except OSError as e:
-                    logger.error(f"백업 파일 삭제 실패 ({file_name}): {e}")
-                    failed_count += 1 # 파일 삭제에 실패했으므로 실패로 간주
-            else:
-                logger.error(f"최종 DB 저장 실패: 백업 파일 유지 ({file_name})")
-                failed_count += 1
-        
-        return {'processed': total_files, 'success': success_count, 'failed': failed_count}
-
-    def backup_alerts_to_csv(self, alerts_to_backup: List[AlertData]) -> str:
-        """
-        저장 실패한 알림 데이터를 CSV 파일로 백업합니다.
-        한 세션에서는 하나의 파일에 계속 추가합니다.
-
-        Args:
-            alerts_to_backup: 백업할 알림 데이터 리스트
-
-        Returns:
-            저장된 CSV 파일의 경로. 실패 시 빈 문자열 반환.
-        """
-        if not alerts_to_backup:
-            return ""
-
-        backup_dir = "backup_logs"
-        try:
-            os.makedirs(backup_dir, exist_ok=True)
-            
-            # 현재 세션에서 사용 중인 백업 파일이 있는지 확인
-            if self._current_log_backup_path and os.path.exists(self._current_log_backup_path):
-                file_path = self._current_log_backup_path
-                write_header = False
-                open_mode = 'a'
-            else:
-                # 새 세션 또는 첫 백업 시 새 파일 생성
-                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                file_path = os.path.join(backup_dir, f"backup_log_{timestamp}.csv")
-                self._current_log_backup_path = file_path # 현재 세션 파일 경로 저장
-                write_header = True
-                open_mode = 'w'
-
-            header = [
-                'reg_date', 'string_id', 'rsd_id', 'log_type', 'log_title',
-                'log_content', 'channel_no'
-            ]
-
-            with open(file_path, open_mode, newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                if write_header:
-                    writer.writerow(header)
-
-                for alert in alerts_to_backup:
-                    row = [
-                        alert.reg_date.strftime("%Y-%m-%d %H:%M:%S.%f"),
-                        alert.string_id if alert.string_id is not None else '',
-                        alert.rsd_id if alert.rsd_id is not None else '',
-                        alert.log_type,
-                        alert.log_title,
-                        alert.log_content,
-                        alert.channel_no if alert.channel_no is not None else ''
-                    ]
-                    writer.writerow(row)
-            
-            log_action = "추가" if open_mode == 'a' else "생성"
-            logger.info(f"로그 데이터 백업 {log_action} 성공: {len(alerts_to_backup)}개 알림 -> {file_path}")
-            return file_path
-
-        except Exception as e:
-            logger.error(f"로그 CSV 백업 실패: {e}")
-            return ""
-
-
-    def _parse_csv_to_alert_data(self, file_path: str) -> List[AlertData]:
-        """
-        단일 로그 CSV 파일을 파싱하여 AlertData 리스트로 변환합니다.
-        """
-        alerts = []
-        try:
-            with open(file_path, 'r', newline='', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    alerts.append(AlertData(
-                        reg_date=datetime.strptime(row['reg_date'], "%Y-%m-%d %H:%M:%S.%f"),
-                        string_id=int(row['string_id']) if row['string_id'] else None,
-                        rsd_id=int(row['rsd_id']) if row['rsd_id'] else None,
-                        log_type=int(row['log_type']),
-                        log_title=row['log_title'],
-                        log_content=row['log_content'],
-                        channel_no=int(row['channel_no']) if row['channel_no'] else None
-                    ))
-            return alerts
-        except Exception as e:
-            logger.error(f"로그 CSV 파일 파싱 실패 ({os.path.basename(file_path)}): {e}")
-            return []
-
-    async def process_pending_log_backups(self) -> Dict[str, Any]:
-        """
-        'backup_logs' 디렉터리의 모든 CSV 파일을 처리하여 DB에 저장합니다.
-        성공 시 CSV 파일을 삭제하고, 실패 시 그대로 둡니다.
-        """
-        backup_dir = "backup_logs"
-        if not os.path.exists(backup_dir):
-            return {'processed': 0, 'success': 0, 'failed': 0}
-
-        csv_files = [f for f in os.listdir(backup_dir) if f.endswith('.csv')]
-        if not csv_files:
-            return {'processed': 0, 'success': 0, 'failed': 0}
-
-        total_files = len(csv_files)
-        success_count = 0
-        failed_count = 0
-        
-        logger.info(f"DB에 저장되지 않은 로그 백업 파일 {total_files}개를 발견했습니다. 복구를 시작합니다.")
-
-        for file_name in csv_files:
-            file_path = os.path.join(backup_dir, file_name)
-            logger.info(f"로그 파일 처리 중: {file_name}")
-            
-            alerts_to_save = self._parse_csv_to_alert_data(file_path)
-            if not alerts_to_save:
-                logger.warning(f"{file_name} 파싱 결과 데이터가 없어 건너뜁니다.")
-                failed_count += 1
-                continue
-
-            all_saved = True
-            try:
-                # 배치로 한 번에 저장 시도
-                alert_tuples = [
-                    (a.string_id, a.rsd_id, a.log_type, a.log_title, a.log_content, a.reg_date)
-                    for a in alerts_to_save
-                ]
-                query = """
-                INSERT INTO TB_ALERT_LOG3 (
-                    string_id, rsd_id, log_type, log_title, log_content, reg_date
-                ) VALUES ($1, $2, $3, $4, $5, $6)
-                """
-                await self.connection.execute_many(query, alert_tuples)
-            except Exception as e:
-                logger.error(f"백업된 로그 배치 저장 실패 (파일: {file_name}): {e}")
-                all_saved = False
-            
-            if all_saved:
-                try:
-                    os.remove(file_path)
-                    logger.info(f"로그 백업 파일 삭제 완료: {file_name}")
-                    success_count += 1
-                    # 현재 세션 파일이 삭제된 경우, 경로 초기화
-                    if file_path == self._current_log_backup_path:
-                        self._current_log_backup_path = None
-                except OSError as e:
-                    logger.error(f"로그 백업 파일 삭제 실패 ({file_name}): {e}")
-                    failed_count += 1
-            else:
-                logger.error(f"로그 DB 저장 실패: 백업 파일 유지 ({file_name})")
-                failed_count += 1
-        
-        return {'processed': total_files, 'success': success_count, 'failed': failed_count}
-
+         
+    
     def get_sensor_repository(self) -> Optional[SensorDataRepository]:
         """센서 데이터 저장소 반환"""
         if not self._is_initialized:
