@@ -86,31 +86,52 @@ class RSDProtocol:
             헤더 유효성 여부
         """
         try:
+            # 최소 패킷 길이 검증 (헤더 4바이트 + 최소 데이터 + 체크섬 1바이트)
             if len(response_data) < 5:
+                logger.debug("응답 패킷 길이 부족")
                 return False
             
             # 헤더 파싱
-            stx, addr, func, data_len = struct.unpack('BBBB', response_data[:4])
+            try:
+                stx, addr, func, data_len = struct.unpack('BBBB', response_data[:4])
+            except struct.error as e:
+                logger.debug(f"헤더 파싱 실패: {e}")
+                return False
             
+            # 시작 바이트 검증
             if stx != cls.START_BYTE:
+                logger.debug(f"잘못된 시작 바이트: 0x{stx:02X} (기대값: 0x{cls.START_BYTE:02X})")
                 return False
             
+            # 기능 코드 검증
             if func != cls.FUNCTION_READ_DATA:
+                logger.debug(f"잘못된 기능 코드: 0x{func:02X} (기대값: 0x{cls.FUNCTION_READ_DATA:02X})")
                 return False
             
-            # 데이터 길이 검증
-            expected_length = 4 + data_len + 1
+            # 전체 패킷 길이 검증
+            expected_length = 4 + data_len + 1  # 헤더 + 데이터 + 체크섬
             if len(response_data) != expected_length:
+                logger.debug(f"패킷 길이 불일치: {len(response_data)} (기대값: {expected_length})")
                 return False
             
             # 체크섬 검증
             received_checksum = response_data[-1]
             calculated_checksum = cls.calculate_checksum(response_data[:-1])
             
-            return received_checksum == calculated_checksum
+            if received_checksum != calculated_checksum:
+                logger.debug(f"체크섬 불일치: 0x{received_checksum:02X} (계산값: 0x{calculated_checksum:02X})")
+                return False
             
+            return True
+            
+        except (struct.error, IndexError) as e:
+            logger.debug(f"패킷 구조 오류: {e}")
+            return False
+        except ValueError as e:
+            logger.debug(f"패킷 값 오류: {e}")
+            return False
         except Exception as e:
-            logger.debug(f"응답 헤더 검증 오류: {e}")
+            logger.warning(f"패킷 검증 중 예상치 못한 오류: {e}")
             return False
 
 
@@ -145,8 +166,17 @@ class StringManager:
             logger.info(f"활성 String 목록 로드 완료: {len(strings)}개")
             return strings
             
+        except asyncio.TimeoutError as e:
+            logger.error(f"String 목록 로드 타임아웃: {e}")
+            return []
+        except ConnectionError as e:
+            logger.error(f"DB 연결 오류로 String 목록 로드 실패: {e}")
+            return []
+        except ValueError as e:
+            logger.error(f"String 데이터 형식 오류: {e}")
+            return []
         except Exception as e:
-            logger.error(f"활성 String 목록 로드 실패: {e}")
+            logger.error(f"활성 String 목록 로드 중 예상치 못한 오류: {e}")
             return []
     
     async def get_string_by_id(self, string_id: int) -> Optional[StringInfo]:
@@ -164,8 +194,17 @@ class StringManager:
             if string_info:
                 self.strings[string_id] = string_info
             return string_info
+        except asyncio.TimeoutError as e:
+            logger.error(f"String {string_id} 조회 타임아웃: {e}")
+            return None
+        except ConnectionError as e:
+            logger.error(f"DB 연결 오류로 String {string_id} 조회 실패: {e}")
+            return None
+        except ValueError as e:
+            logger.error(f"String {string_id} 데이터 형식 오류: {e}")
+            return None
         except Exception as e:
-            logger.error(f"String {string_id} 조회 실패: {e}")
+            logger.error(f"String {string_id} 조회 중 예상치 못한 오류: {e}")
             return None
     
     def add_string(self, string_info: StringInfo):
@@ -199,8 +238,17 @@ class RSDManager:
             logger.info(f"String {string_id}의 RSD 목록 로드 완료: {len(devices)}개")
             return devices
             
+        except asyncio.TimeoutError as e:
+            logger.error(f"String {string_id}의 RSD 목록 로드 타임아웃: {e}")
+            return []
+        except ConnectionError as e:
+            logger.error(f"DB 연결 오류로 String {string_id}의 RSD 목록 로드 실패: {e}")
+            return []
+        except ValueError as e:
+            logger.error(f"String {string_id}의 RSD 데이터 형식 오류: {e}")
+            return []
         except Exception as e:
-            logger.error(f"String {string_id}의 RSD 목록 로드 실패: {e}")
+            logger.error(f"String {string_id}의 RSD 목록 로드 중 예상치 못한 오류: {e}")
             return []
     
     async def get_rsd_by_id(self, string_id: int, rsd_id: int) -> Optional[DeviceInfo]:
@@ -211,8 +259,17 @@ class RSDManager:
                 if device.rsd_id == rsd_id:
                     return device
             return None
+        except asyncio.TimeoutError as e:
+            logger.error(f"RSD 조회 타임아웃 - String {string_id}, RSD {rsd_id}: {e}")
+            return None
+        except ConnectionError as e:
+            logger.error(f"DB 연결 오류로 RSD 조회 실패 - String {string_id}, RSD {rsd_id}: {e}")
+            return None
+        except ValueError as e:
+            logger.error(f"RSD 데이터 형식 오류 - String {string_id}, RSD {rsd_id}: {e}")
+            return None
         except Exception as e:
-            logger.error(f"RSD 조회 실패 - String {string_id}, RSD {rsd_id}: {e}")
+            logger.error(f"RSD 조회 중 예상치 못한 오류 - String {string_id}, RSD {rsd_id}: {e}")
             return None
     
     def add_device(self, device_info: DeviceInfo):
@@ -333,14 +390,33 @@ class RSDTestManager:
                     delay = self.config.monitoring_rsd_communication_delay
                     await asyncio.sleep(delay)
                 
-            except Exception as e:
-                logger.error(f"String {string_info.string_id}, RSD {device.rsd_id} 테스트 중 예외: {e}")
+            except asyncio.CancelledError:
+                logger.warning(f"String {string_info.string_id}, RSD {device.rsd_id} 테스트 취소됨")
                 test_results.append(RSDTestResult(
                     string_id=string_info.string_id,
                     rsd_id=device.rsd_id,
                     is_success=False,
                     response_time=0.0,
-                    error_message=f"테스트 예외: {str(e)}"
+                    error_message="테스트 취소됨"
+                ))
+                raise  # 취소 신호는 상위로 전파
+            except OSError as e:
+                logger.error(f"String {string_info.string_id}, RSD {device.rsd_id} 네트워크 오류: {e}")
+                test_results.append(RSDTestResult(
+                    string_id=string_info.string_id,
+                    rsd_id=device.rsd_id,
+                    is_success=False,
+                    response_time=0.0,
+                    error_message=f"네트워크 오류: {str(e)}"
+                ))
+            except Exception as e:
+                logger.error(f"String {string_info.string_id}, RSD {device.rsd_id} 테스트 중 예상치 못한 오류: {e}")
+                test_results.append(RSDTestResult(
+                    string_id=string_info.string_id,
+                    rsd_id=device.rsd_id,
+                    is_success=False,
+                    response_time=0.0,
+                    error_message=f"예상치 못한 오류: {str(e)}"
                 ))
         
         success_count = sum(1 for r in test_results if r.is_success)
@@ -404,8 +480,15 @@ class RSDTestManager:
                 if string_idx < len(strings) - 1:
                     await asyncio.sleep(0.1)
                 
+            except asyncio.CancelledError:
+                logger.warning(f"String {string_info.string_id} 테스트 취소됨")
+                all_results[string_info.string_id] = []
+                raise  # 취소 신호는 상위로 전파
+            except OSError as e:
+                logger.error(f"String {string_info.string_id} 네트워크 오류로 테스트 실패: {e}")
+                all_results[string_info.string_id] = []
             except Exception as e:
-                logger.error(f"String {string_info.string_id} 테스트 실패: {e}")
+                logger.error(f"String {string_info.string_id} 테스트 중 예상치 못한 오류: {e}")
                 all_results[string_info.string_id] = []
         
         # 전체 통계
@@ -465,7 +548,7 @@ class RSDTestManager:
             'overall_success_rate': round((successful_devices / total_devices * 100), 2) if total_devices > 0 else 0,
             'avg_response_time': round(total_response_time / total_devices, 3) if total_devices > 0 else 0,
             'string_summaries': string_summaries,
-            'test_interval_used': self.config.monitoring_rsd_communication_delay  # 실제 사용된 간격 정보 추가
+            'test_interval_used': self.config.monitoring_rsd_communication_delay
         }
     
     async def _perform_single_test(self, string_info: StringInfo, rsd_id: int) -> RSDTestResult:
@@ -512,9 +595,12 @@ class RSDTestManager:
                 
         except asyncio.TimeoutError:
             error_message = "연결 타임아웃"
-            
+        except ConnectionRefusedError:
+            error_message = "연결 거부됨"
+        except OSError as e:
+            error_message = f"네트워크 오류: {str(e)}"
         except Exception as e:
-            error_message = f"통신 오류: {str(e)}"
+            error_message = f"예상치 못한 통신 오류: {str(e)}"
 
         response_time = (datetime.now() - start_time).total_seconds()
 
@@ -537,54 +623,3 @@ class RSDTestManager:
             response_time=response_time,
             error_message=error_message
         )
-
-    def get_test_summary(self, test_results: Dict[int, List[RSDTestResult]]) -> Dict[str, Any]:
-        """
-        테스트 결과 요약 정보 생성 (새 메서드)
-        
-        Args:
-            test_results: String별 테스트 결과
-            
-        Returns:
-            테스트 요약 정보
-        """
-        total_strings = len(test_results)
-        active_strings = 0
-        inactive_strings = 0
-        total_rsds = 0
-        active_rsds = 0
-        
-        string_details = {}
-        
-        for string_id, results in test_results.items():
-            successful_rsds = [r for r in results if r.is_success]
-            failed_rsds = [r for r in results if not r.is_success]
-            
-            total_rsds += len(results)
-            active_rsds += len(successful_rsds)
-            
-            if successful_rsds:
-                active_strings += 1
-                string_status = "활성"
-            else:
-                inactive_strings += 1
-                string_status = "비활성"
-            
-            string_details[string_id] = {
-                'status': string_status,
-                'total_rsds': len(results),
-                'active_rsds': len(successful_rsds),
-                'failed_rsds': len(failed_rsds),
-                'success_rate': len(successful_rsds) / len(results) * 100 if results else 0
-            }
-        
-        return {
-            'total_strings': total_strings,
-            'active_strings': active_strings,
-            'inactive_strings': inactive_strings,
-            'total_rsds': total_rsds,
-            'active_rsds': active_rsds,
-            'failed_rsds': total_rsds - active_rsds,
-            'overall_success_rate': (active_rsds / total_rsds * 100) if total_rsds > 0 else 0,
-            'string_details': string_details
-        }

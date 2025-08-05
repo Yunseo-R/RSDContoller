@@ -1,11 +1,12 @@
 """
 RSD 모니터링 시스템 설정 관리자
 설정 파일(config.ini)의 생성, 파싱, 저장을 담당함.
+미완성 메서드들 완성
 """
 
 import os
 import configparser
-from typing import Any, Optional
+from typing import Optional, List
 from dataclasses import dataclass
 
 
@@ -91,7 +92,7 @@ class ConfigManager:
             print("기본 설정 파일이 생성되었습니다.")
     
     def _load_config(self) -> None:
-        """설정 파일(ini)을 읽어 각 변수에 값을 로드"""
+        """설정 파일에서 값 로드"""
         try:
             self.config.read(self.config_path, encoding='utf-8')
             
@@ -135,47 +136,12 @@ class ConfigManager:
             print("일부 설정이 기본값으로 사용됩니다")
 
     def _create_default_config(self) -> None:
-        """기본 설정값으로 ConfigParser 객체 생성."""
-        self.config.clear()
-        
-        # 각 섹션 및 키-값 설정
-        # Database 섹션
-        self.config.add_section('database')
-        self.config.set('database', 'host', self.database_host)
-        self.config.set('database', 'port', str(self.database_port))
-        self.config.set('database', 'database', self.database_name)
-        self.config.set('database', 'username', self.database_username)
-        self.config.set('database', 'password', self.database_password)
-        
-        # Monitoring 섹션
-        self.config.add_section('monitoring')
-        self.config.set('monitoring', 'display_interval', str(self.monitoring_display_interval))
-        self.config.set('monitoring', 'communication_interval', str(self.monitoring_communication_interval))
-        self.config.set('monitoring', 'save_interval', str(self.monitoring_save_interval))
-        self.config.set('monitoring', 'rsd_communication_delay', str(self.monitoring_rsd_communication_delay))
-        
-        # TCP Communication 섹션
-        self.config.add_section('tcp_communication')
-        self.config.set('tcp_communication', 'connection_timeout', str(self.tcp_connection_timeout))
-        self.config.set('tcp_communication', 'read_timeout', str(self.tcp_read_timeout))
-        self.config.set('tcp_communication', 'max_retries', str(self.tcp_max_retries))
-        self.config.set('tcp_communication', 'rsd_port', str(self.tcp_rsd_port))
-        self.config.set('tcp_communication', 'retry_delay', str(self.tcp_retry_delay))
-        self.config.set('tcp_communication', 'socket_reuse', str(self.tcp_socket_reuse).lower())
-        self.config.set('tcp_communication', 'buffer_size', str(self.tcp_buffer_size))
-        
-        # Logging 섹션
-        self.config.add_section('logging')
-        self.config.set('logging', 'level', self.logging_level)
-        self.config.set('logging', 'log_dir', self.logging_dir)
-        self.config.set('logging', 'daily_rotation', str(self.logging_daily_rotation).lower())
-        self.config.set('logging', 'max_days_keep', str(self.logging_max_days_keep))
-        self.config.set('logging', 'console_output', str(self.logging_console_output).lower())
-        self.config.set('logging', 'packet_debug', str(self.logging_packet_debug).lower())
-        self.config.set('logging', 'communication_detail', str(self.logging_communication_detail).lower())
-    
+        """기본 설정값으로 ConfigParser 객체 생성"""
+        # 기본값을 config 객체에 반영
+        self._sync_variables_to_config()
+
     def _sync_variables_to_config(self) -> None:
-        """현재 인스턴스 변수 값을 ConfigParser 객체에 동기화."""
+        """현재 변수값들을 ConfigParser 객체에 동기화"""
         # Database 섹션
         if not self.config.has_section('database'):
             self.config.add_section('database')
@@ -267,15 +233,23 @@ class ConfigManager:
     # 모니터링 설정 접근 메서드
     # =========================================================================
     
-    def update_monitoring_config(self, display_interval: Optional[int] = None,
-                             communication_interval: Optional[int] = None,
-                             save_interval: Optional[int] = None,
-                             rsd_communication_delay: Optional[float] = None) -> None:
-        """모니터링 설정 업데이트"""
-        if display_interval is not None:
-            self.monitoring_display_interval = display_interval
+    def update_monitoring_settings(self, communication_interval: Optional[int] = None,
+                                 display_interval: Optional[int] = None,
+                                 save_interval: Optional[int] = None,
+                                 rsd_communication_delay: Optional[float] = None) -> None:
+        """
+        모니터링 설정 업데이트
+        
+        Args:
+            communication_interval: 통신 간격 (초)
+            display_interval: 표시 갱신 간격 (초)
+            save_interval: 저장 간격 (초)
+            rsd_communication_delay: RSD 간 통신 지연 (초)
+        """
         if communication_interval is not None:
             self.monitoring_communication_interval = communication_interval
+        if display_interval is not None:
+            self.monitoring_display_interval = display_interval
         if save_interval is not None:
             self.monitoring_save_interval = save_interval
         if rsd_communication_delay is not None:
@@ -283,16 +257,39 @@ class ConfigManager:
         
         self._save_config()
         print("모니터링 설정이 업데이트되었습니다")
-
+    
+    def get_monitoring_intervals(self) -> dict:
+        """모니터링 간격 설정 반환"""
+        return {
+            'communication_interval': self.monitoring_communication_interval,
+            'display_interval': self.monitoring_display_interval,
+            'save_interval': self.monitoring_save_interval,
+            'rsd_communication_delay': self.monitoring_rsd_communication_delay
+        }
+    
     # =========================================================================
     # TCP 통신 설정 접근 메서드
     # =========================================================================
     
-    def update_tcp_config(self, connection_timeout: Optional[float] = None,
-                         read_timeout: Optional[float] = None, max_retries: Optional[int] = None,
-                         rsd_port: Optional[int] = None, retry_delay: Optional[float] = None,
-                         socket_reuse: Optional[bool] = None, buffer_size: Optional[int] = None) -> None:
-        """TCP 통신 설정 업데이트"""
+    def update_tcp_settings(self, connection_timeout: Optional[float] = None,
+                          read_timeout: Optional[float] = None,
+                          max_retries: Optional[int] = None,
+                          rsd_port: Optional[int] = None,
+                          retry_delay: Optional[float] = None,
+                          socket_reuse: Optional[bool] = None,
+                          buffer_size: Optional[int] = None) -> None:
+        """
+        TCP 통신 설정 업데이트
+        
+        Args:
+            connection_timeout: 연결 타임아웃 (초)
+            read_timeout: 읽기 타임아웃 (초)
+            max_retries: 최대 재시도 횟수
+            rsd_port: RSD 통신 포트
+            retry_delay: 재시도 지연 (초)
+            socket_reuse: 소켓 재사용 여부
+            buffer_size: 버퍼 크기
+        """
         if connection_timeout is not None:
             self.tcp_connection_timeout = connection_timeout
         if read_timeout is not None:
@@ -311,15 +308,41 @@ class ConfigManager:
         self._save_config()
         print("TCP 통신 설정이 업데이트되었습니다")
     
+    def get_tcp_settings(self) -> dict:
+        """TCP 통신 설정 반환"""
+        return {
+            'connection_timeout': self.tcp_connection_timeout,
+            'read_timeout': self.tcp_read_timeout,
+            'max_retries': self.tcp_max_retries,
+            'rsd_port': self.tcp_rsd_port,
+            'retry_delay': self.tcp_retry_delay,
+            'socket_reuse': self.tcp_socket_reuse,
+            'buffer_size': self.tcp_buffer_size
+        }
+    
     # =========================================================================
     # 로깅 설정 접근 메서드
     # =========================================================================
     
-    def update_logging_config(self, level: Optional[str] = None, log_dir: Optional[str] = None, 
-                            daily_rotation: Optional[bool] = None, max_days_keep: Optional[int] = None,
-                            console_output: Optional[bool] = None, packet_debug: Optional[bool] = None,
-                            communication_detail: Optional[bool] = None) -> None:
-        """로깅 설정 업데이트"""
+    def update_logging_settings(self, level: Optional[str] = None,
+                              log_dir: Optional[str] = None,
+                              daily_rotation: Optional[bool] = None,
+                              max_days_keep: Optional[int] = None,
+                              console_output: Optional[bool] = None,
+                              packet_debug: Optional[bool] = None,
+                              communication_detail: Optional[bool] = None) -> None:
+        """
+        로깅 설정 업데이트
+        
+        Args:
+            level: 로그 레벨
+            log_dir: 로그 디렉터리
+            daily_rotation: 일별 로그 파일 생성 여부
+            max_days_keep: 로그 파일 보관 일수
+            console_output: 콘솔 출력 여부
+            packet_debug: 패킷 디버그 로그 여부
+            communication_detail: 상세 통신 로그 여부
+        """
         if level is not None:
             self.logging_level = level
         if log_dir is not None:
@@ -338,20 +361,155 @@ class ConfigManager:
         self._save_config()
         print("로깅 설정이 업데이트되었습니다")
     
-    def reload_config(self) -> None:
-        """설정 파일을 다시 로드하여 현재 설정에 반영."""
-        self._load_config()
-        print("설정 파일 재로드 완료")
+    def get_logging_settings(self) -> dict:
+        """로깅 설정 반환"""
+        return {
+            'level': self.logging_level,
+            'log_dir': self.logging_dir,
+            'daily_rotation': self.logging_daily_rotation,
+            'max_days_keep': self.logging_max_days_keep,
+            'console_output': self.logging_console_output,
+            'packet_debug': self.logging_packet_debug,
+            'communication_detail': self.logging_communication_detail
+        }
     
-    def save_current_config(self) -> None:
-        """현재 설정을 파일에 저장"""
+    # =========================================================================
+    # 설정 파일 관리 메서드
+    # =========================================================================
+    
+    def reload_config(self) -> bool:
+        """설정 파일 다시 로드"""
+        try:
+            self._load_config()
+            print("설정 파일이 다시 로드되었습니다")
+            return True
+        except Exception as e:
+            print(f"설정 파일 로드 실패: {e}")
+            return False
+    
+    def reset_to_defaults(self) -> None:
+        """모든 설정을 기본값으로 초기화"""
+        self._init_default_values()
         self._save_config()
+        print("모든 설정이 기본값으로 초기화되었습니다")
     
-    def log_current_settings(self) -> None:
-        """현재 적용된 모든 설정 값을 콘솔에 출력."""
-        print("=== 현재 설정 값 ===")
-        print(f"DB: {self.database_host}:{self.database_port}/{self.database_name}")
-        print(f"모니터링: 표시 {self.monitoring_display_interval}초, 저장 {self.monitoring_save_interval}초, 통신 주기 {self.monitoring_communication_interval}초, 통신간격 {self.monitoring_rsd_communication_delay}초")
-        print(f"TCP: 포트 {self.tcp_rsd_port}, 연결 {self.tcp_connection_timeout}초, 읽기 {self.tcp_read_timeout}초, 재시도 {self.tcp_max_retries}회")
-        print(f"로깅: {self.logging_level} 레벨, 디렉토리 '{self.logging_dir}', 패킷디버깅 {self.logging_packet_debug}")
-        print("==================")
+    def export_config(self, export_path: str) -> bool:
+        """설정을 다른 파일로 내보내기"""
+        try:
+            self._sync_variables_to_config()
+            
+            # 디렉터리 생성
+            os.makedirs(os.path.dirname(export_path) if os.path.dirname(export_path) else '.', exist_ok=True)
+            
+            with open(export_path, 'w', encoding='utf-8') as configfile:
+                self.config.write(configfile)
+            
+            print(f"설정이 {export_path}로 내보내기되었습니다")
+            return True
+        except Exception as e:
+            print(f"설정 내보내기 실패: {e}")
+            return False
+    
+    def import_config(self, import_path: str) -> bool:
+        """다른 파일에서 설정 가져오기"""
+        try:
+            if not os.path.exists(import_path):
+                print(f"설정 파일이 존재하지 않습니다: {import_path}")
+                return False
+            
+            # 임시 ConfigParser로 파일 검증
+            temp_config = configparser.ConfigParser()
+            temp_config.read(import_path, encoding='utf-8')
+            
+            # 검증 성공 시 현재 설정 파일 경로에 복사
+            import shutil
+            shutil.copy2(import_path, self.config_path)
+            
+            # 설정 다시 로드
+            self._load_config()
+            
+            print(f"설정이 {import_path}에서 가져와졌습니다")
+            return True
+        except Exception as e:
+            print(f"설정 가져오기 실패: {e}")
+            return False
+    
+    def validate_config(self) -> List[str]:
+        """설정값 유효성 검증"""
+        errors = []
+        
+        # 데이터베이스 설정 검증
+        if not self.database_host:
+            errors.append("데이터베이스 호스트가 설정되지 않았습니다")
+        if not (1 <= self.database_port <= 65535):
+            errors.append("데이터베이스 포트가 유효하지 않습니다 (1-65535)")
+        if not self.database_name:
+            errors.append("데이터베이스 이름이 설정되지 않았습니다")
+        if not self.database_username:
+            errors.append("데이터베이스 사용자명이 설정되지 않았습니다")
+        
+        # 모니터링 설정 검증
+        if self.monitoring_communication_interval <= 0:
+            errors.append("통신 간격은 0보다 커야 합니다")
+        if self.monitoring_display_interval <= 0:
+            errors.append("표시 간격은 0보다 커야 합니다")
+        if self.monitoring_save_interval <= 0:
+            errors.append("저장 간격은 0보다 커야 합니다")
+        if self.monitoring_rsd_communication_delay < 0:
+            errors.append("RSD 통신 지연은 0 이상이어야 합니다")
+        
+        # TCP 설정 검증
+        if self.tcp_connection_timeout <= 0:
+            errors.append("연결 타임아웃은 0보다 커야 합니다")
+        if self.tcp_read_timeout <= 0:
+            errors.append("읽기 타임아웃은 0보다 커야 합니다")
+        if not (1 <= self.tcp_rsd_port <= 65535):
+            errors.append("RSD 포트가 유효하지 않습니다 (1-65535)")
+        if self.tcp_max_retries < 0:
+            errors.append("최대 재시도 횟수는 0 이상이어야 합니다")
+        if self.tcp_buffer_size <= 0:
+            errors.append("버퍼 크기는 0보다 커야 합니다")
+        
+        # 로깅 설정 검증
+        valid_log_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+        if self.logging_level.upper() not in valid_log_levels:
+            errors.append(f"로그 레벨이 유효하지 않습니다. 사용 가능한 레벨: {', '.join(valid_log_levels)}")
+        if self.logging_max_days_keep <= 0:
+            errors.append("로그 보관 일수는 0보다 커야 합니다")
+        
+        return errors
+    
+    def print_current_config(self) -> None:
+        """현재 설정 출력"""
+        print("\n=== 현재 설정 ===")
+        print(f"[데이터베이스]")
+        print(f"  호스트: {self.database_host}")
+        print(f"  포트: {self.database_port}")
+        print(f"  데이터베이스: {self.database_name}")
+        print(f"  사용자명: {self.database_username}")
+        print(f"  비밀번호: {'*' * len(self.database_password)}")
+        
+        print(f"\n[모니터링]")
+        print(f"  통신 간격: {self.monitoring_communication_interval}초")
+        print(f"  표시 간격: {self.monitoring_display_interval}초")
+        print(f"  저장 간격: {self.monitoring_save_interval}초")
+        print(f"  RSD 통신 지연: {self.monitoring_rsd_communication_delay}초")
+        
+        print(f"\n[TCP 통신]")
+        print(f"  연결 타임아웃: {self.tcp_connection_timeout}초")
+        print(f"  읽기 타임아웃: {self.tcp_read_timeout}초")
+        print(f"  최대 재시도: {self.tcp_max_retries}회")
+        print(f"  RSD 포트: {self.tcp_rsd_port}")
+        print(f"  재시도 지연: {self.tcp_retry_delay}초")
+        print(f"  소켓 재사용: {self.tcp_socket_reuse}")
+        print(f"  버퍼 크기: {self.tcp_buffer_size}")
+        
+        print(f"\n[로깅]")
+        print(f"  레벨: {self.logging_level}")
+        print(f"  디렉터리: {self.logging_dir}")
+        print(f"  일별 회전: {self.logging_daily_rotation}")
+        print(f"  보관 일수: {self.logging_max_days_keep}일")
+        print(f"  콘솔 출력: {self.logging_console_output}")
+        print(f"  패킷 디버그: {self.logging_packet_debug}")
+        print(f"  통신 상세: {self.logging_communication_detail}")
+        print("================\n")

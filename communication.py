@@ -228,65 +228,62 @@ class RSDDataCollector:
                                      device: DeviceInfo) -> Optional[RSDSensorData]:
         """단일 RSD에서 센서 데이터 수집 (LogManager 로그 기록 추가)"""
         start_time = datetime.now()
+        sock = None # 소켓 변수 초기화
         
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(self.config.tcp_connection_timeout)
             
-            try:
-                # TCP 연결
-                sock.connect((string_info.static_ip, self.config.tcp_rsd_port))
+            # TCP 연결
+            sock.connect((string_info.static_ip, self.config.tcp_rsd_port))
+            
+            # 요청 패킷 생성 및 전송
+            request_packet = self.protocol.create_read_request(device.rsd_id, 0)
+            
+            # 패킷 송신 로그 추가
+            if self.log_manager and self.config.logging_packet_debug:
+                self.log_manager.packet_log(string_info.string_id, device.rsd_id, 
+                                          "send", request_packet.hex().upper())
+            
+            sock.send(request_packet)
+            
+            # 응답 수신
+            sock.settimeout(self.config.tcp_read_timeout)
+            response_data = sock.recv(self.config.tcp_buffer_size)
+            
+            # 패킷 수신 로그 추가
+            if self.log_manager and self.config.logging_packet_debug:
+                self.log_manager.packet_log(string_info.string_id, device.rsd_id, 
+                                          "recv", response_data.hex().upper())
+            
+            duration = (datetime.now() - start_time).total_seconds()
+            
+            # 데이터 파싱
+            sensor_data = self.protocol.parse_sensor_data(response_data, string_info.string_id)
+            
+            # 통신 결과 로그 추가
+            if sensor_data and self.log_manager:
+                self.log_manager.communication_log(
+                    string_info.string_id, device.rsd_id, "sensor_poll", 
+                    "success", duration, f"{len(sensor_data.channels)}개 채널"
+                )
                 
-                # 요청 패킷 생성 및 전송
-                request_packet = self.protocol.create_read_request(device.rsd_id, 0)
-                
-                # 패킷 송신 로그 추가
-                if self.log_manager and self.config.logging_packet_debug:
-                    self.log_manager.packet_log(string_info.string_id, device.rsd_id, 
-                                              "send", request_packet.hex().upper())
-                
-                sock.send(request_packet)
-                
-                # 응답 수신
-                sock.settimeout(self.config.tcp_read_timeout)
-                response_data = sock.recv(self.config.tcp_buffer_size)
-                
-                # 패킷 수신 로그 추가
-                if self.log_manager and self.config.logging_packet_debug:
-                    self.log_manager.packet_log(string_info.string_id, device.rsd_id, 
-                                              "recv", response_data.hex().upper())
-                
-                duration = (datetime.now() - start_time).total_seconds()
-                
-                # 데이터 파싱
-                sensor_data = self.protocol.parse_sensor_data(response_data, string_info.string_id)
-                
-                # 통신 결과 로그 추가
-                if sensor_data and self.log_manager:
-                    self.log_manager.communication_log(
-                        string_info.string_id, device.rsd_id, "sensor_poll", 
-                        "success", duration, f"{len(sensor_data.channels)}개 채널"
-                    )
-                    
-                    # 아크 감지 로그 추가
-                    for channel in sensor_data.channels:
-                        if channel.is_arc:
-                            self.log_manager.arc_detection_log(
-                                string_info.string_id, device.rsd_id, 
-                                channel.channel_no, channel.arc_frequency, 
-                                channel.arc_count
-                            )
-                elif self.log_manager:
-                    self.log_manager.communication_log(
-                        string_info.string_id, device.rsd_id, "sensor_poll", 
-                        "parse_error", duration, "데이터 파싱 실패"
-                    )
-                
-                return sensor_data
-                
-            finally:
-                sock.close()
-                
+                # 아크 감지 로그 추가
+                for channel in sensor_data.channels:
+                    if channel.is_arc:
+                        self.log_manager.arc_detection_log(
+                            string_info.string_id, device.rsd_id, 
+                            channel.channel_no, channel.arc_frequency, 
+                            channel.arc_count
+                        )
+            elif self.log_manager:
+                self.log_manager.communication_log(
+                    string_info.string_id, device.rsd_id, "sensor_poll", 
+                    "parse_error", duration, "데이터 파싱 실패"
+                )
+            
+            return sensor_data
+            
         except socket.timeout:
             duration = (datetime.now() - start_time).total_seconds()
             if self.log_manager:
@@ -312,16 +309,24 @@ class RSDDataCollector:
                     event_time=start_time
                 )
             return None
+            
+        finally:
+            # ✅ 모든 경우에 소켓이 닫히도록 보장
+            if sock:
+                sock.close()
 
 
     async def close_all_connections(self):
-        """데이터 수집기의 모든 연결 종료"""
+        """
+        데이터 수집기의 모든 연결을 종료합니다.
+        (현재 구조에서는 요청마다 소켓을 생성/해제하므로 특별한 정리 로직이 필요하지 않으나,
+         향후 소켓 풀링 등 확장성을 위해 메서드를 유지합니다.)
+        """
         try:
             if self.log_manager:
                 self.log_manager.operation_log("데이터수집", "데이터 수집기 연결 종료 시작")
             
-            # 현재 활성 소켓이 있다면 종료
-            # (RSDDataCollector는 현재 각 요청마다 소켓을 생성/해제하므로 특별한 정리가 필요하지 않음)
+            # 현재 활성 소켓이 있다면 종료 (향후 확장용)
             
             if self.log_manager:
                 self.log_manager.operation_log("데이터수집", "데이터 수집기 연결 종료 완료")
