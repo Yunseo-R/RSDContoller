@@ -659,8 +659,8 @@ class MonitoringThread(QThread):
 
     async def _save_data_with_retry_and_backup(self, data_to_save: List[RSDSensorData]):
         """
-        데이터를 DB에 저장하되, 실패 시 재시도하고 최종 실패 시 CSV로 백업합니다.
-        성공 시 백업된 로그 복구를 시도합니다.
+        데이터를 DB에 저장하되, 모든 재시도가 실패했을 때만 CSV로 백업합니다.
+        성공 시 또는 백업 성공 시 버퍼를 비워 중복 저장을 방지합니다.
         """
         if not data_to_save:
             return
@@ -672,45 +672,55 @@ class MonitoringThread(QThread):
         for attempt in range(total_attempts):
             try:
                 if self.log_manager:
-                    self.log_manager.operation_log("데이터저장", 
+                    self.log_manager.operation_log("데이터저장",
                         f"DB 저장 시도 #{attempt + 1}/{total_attempts} (대상: {len(data_to_save)}개)")
 
                 saved_count = await self.communication_manager.save_collected_data(data_to_save)
-                
+
                 if saved_count > 0:
+                    # DB 저장 성공 시 버퍼 비우기
                     self._sensor_data_buffer.clear()
                     self._last_save_time = datetime.now()
                     success = True
                     if self.log_manager:
                         self.log_manager.operation_log("데이터저장", f"DB 저장 성공: {saved_count}개")
-                    
-                    # DB 연결 복구 확인 -> 백업된 로그 처리 시도
                     await self._process_log_backups_if_any()
-                    
-                    break
+                    break  # 성공 시 재시도 중단
                 else:
+                    # save_collected_data가 0을 반환하면 실패로 간주
                     if self.log_manager:
                         self.log_manager.error_log("데이터저장", f"시도 #{attempt + 1} 실패: 저장된 데이터 0개")
 
             except Exception as e:
                 if self.log_manager:
                     self.log_manager.error_log("데이터저장", f"시도 #{attempt + 1} 중 예외 발생: {e}")
-            
+
+            # 마지막 시도가 아니면 잠시 대기 (1차, 2차 시도 후에만)
             if attempt < max_retries:
                 await asyncio.sleep(1.0)
 
+        # 모든 재시도가 실패한 경우에만 백업 실행
         if not success:
             if self.log_manager:
-                self.log_manager.error_log("데이터저장", 
+                self.log_manager.error_log("데이터저장",
                     f"총 {total_attempts}회 DB 저장 실패. CSV 백업을 시작합니다.")
 
-            file_path = self.db_manager.backup_data_to_csv(data_to_save)
-            if file_path:
-                self.backup_finished.emit(file_path)
-                self._sensor_data_buffer.clear()
-            else:
+            try:
+                # 올바른 백업 메서드 호출: DatabaseManager → SensorDataRepository
+                file_path = self.db_manager.get_sensor_repository().backup_data_to_csv(data_to_save)
+
+                if file_path:
+                    self.backup_finished.emit(file_path)
+                    # 백업 성공 시 버퍼를 비워 중복 백업을 방지
+                    self._sensor_data_buffer.clear()
+                    if self.log_manager:
+                        self.log_manager.operation_log("데이터저장", f"CSV 백업 성공: {file_path}")
+                else:
+                    if self.log_manager:
+                        self.log_manager.error_log("데이터저장", "치명적 오류: CSV 백업마저 실패했습니다. 데이터가 유실될 수 있습니다.")
+            except Exception as e:
                 if self.log_manager:
-                    self.log_manager.error_log("데이터저장", "치명적 오류: CSV 백업마저 실패했습니다. 데이터가 유실될 수 있습니다.")
+                    self.log_manager.error_log("데이터저장", f"CSV 백업 중 예외 발생: {e}")
 
     async def _process_log_backups_if_any(self):
         """
@@ -719,9 +729,11 @@ class MonitoringThread(QThread):
         if not self.db_manager:
             return
 
-        backup_dir = "backup_logs"
-        if not (os.path.exists(backup_dir) and any(f.endswith('.csv') for f in os.listdir(backup_dir))):
-            return # 처리할 파일이 없으면 조용히 종료
+        backup_dir = "backup"
+        if not (os.path.exists(backup_dir) and 
+                any(f.startswith('backup_log_') and f.endswith('.csv') 
+                    for f in os.listdir(backup_dir))):
+            return
 
         try:
             if self.log_manager:
@@ -733,7 +745,6 @@ class MonitoringThread(QThread):
                 log_msg = f"로그 백업 처리 완료: {result['success']}개 파일 성공, {result['failed']}개 실패."
                 if self.log_manager:
                     self.log_manager.operation_log("로그복구", log_msg)
-                # 메인 윈도우에 간단한 알림을 줄 수 있습니다.
                 self.status_updated.emit(log_msg)
 
         except Exception as e:
@@ -2121,13 +2132,13 @@ class RSDMonitoringMainWindow(QMainWindow):
         (센서 데이터 및 로그 데이터 모두 처리)
         """
         try:
+            backup_dir = "backup" # 공통 백업 폴더
+
             # ===== 센서 데이터 백업 확인 =====
-            backup_dir_data = "backup_data"
-            has_data_backup = os.path.exists(backup_dir_data) and any(f.endswith('.csv') for f in os.listdir(backup_dir_data))
+            has_data_backup = os.path.exists(backup_dir) and any(f.startswith('backup_data_') and f.endswith('.csv') for f in os.listdir(backup_dir))
 
             # ===== 로그 데이터 백업 확인 =====
-            backup_dir_logs = "backup_logs"
-            has_log_backup = os.path.exists(backup_dir_logs) and any(f.endswith('.csv') for f in os.listdir(backup_dir_logs))
+            has_log_backup = os.path.exists(backup_dir) and any(f.startswith('backup_log_') and f.endswith('.csv') for f in os.listdir(backup_dir))
 
             if not has_data_backup and not has_log_backup:
                 return # 백업 파일이 전혀 없으면 종료
@@ -2141,7 +2152,7 @@ class RSDMonitoringMainWindow(QMainWindow):
             message += "\n지금 DB에 저장하시겠습니까?"
 
             reply = QMessageBox.question(self, '백업 데이터 복구', message,
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
 
             if reply == QMessageBox.No:
                 QMessageBox.information(self, '알림', '백업 데이터 복구를 취소했습니다.\n'
@@ -2150,27 +2161,27 @@ class RSDMonitoringMainWindow(QMainWindow):
 
             # 로딩 오버레이 표시
             self.loading_overlay.show_loading("백업 데이터 복구 중...",
-                                              "백업된 CSV 파일을 DB에 저장하고 있습니다...")
+                                            "백업된 CSV 파일을 DB에 저장하고 있습니다...")
             QApplication.processEvents()
 
             # 비동기 작업을 위한 이벤트 루프
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
+
             # DB 매니저 초기화
             is_initialized = loop.run_until_complete(self.db_manager.initialize())
-            
+
             summary_data = {'processed': 0, 'success': 0, 'failed': 0}
             summary_logs = {'processed': 0, 'success': 0, 'failed': 0}
-            
+
             if is_initialized:
                 # 센서 데이터 처리
                 if has_data_backup:
-                    summary_data = loop.run_until_complete(self.db_manager.process_pending_backups())
+                    summary_data = loop.run_until_complete(self.db_manager.sensor_repository.process_pending_backups())
                 # 로그 데이터 처리
                 if has_log_backup:
-                    summary_logs = loop.run_until_complete(self.db_manager.process_pending_log_backups())
-                
+                    summary_logs = loop.run_until_complete(self.db_manager.alert_repository.process_pending_log_backups())
+
                 loop.run_until_complete(self.db_manager.close()) # 리소스 정리
             else:
                 # 초기화 실패
@@ -2182,10 +2193,10 @@ class RSDMonitoringMainWindow(QMainWindow):
 
             # 로딩 오버레이 숨김
             self.loading_overlay.hide_loading()
-            
+
             # 결과 알림
             self._show_backup_result_message(summary_data, summary_logs)
-        
+
         except Exception as e:
             self.loading_overlay.hide_loading()
             QMessageBox.critical(self, '오류', f'백업 데이터 처리 중 오류가 발생했습니다: {e}')

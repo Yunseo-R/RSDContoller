@@ -317,11 +317,11 @@ class SensorDataRepository:
     
     async def save_sensor_data_batch(self, sensor_data_list: List[RSDSensorData]) -> Dict[str, int]:
         """
-        센서 데이터 배치 저장
-        
+        센서 데이터 배치 저장. 실패 시 예외를 발생시켜 호출자가 재시도 로직을 처리하도록 합니다.
+
         Args:
             sensor_data_list: 저장할 센서 데이터 리스트
-            
+
         Returns:
             저장 결과 딕셔너리
         """
@@ -331,7 +331,7 @@ class SensorDataRepository:
                 'success_count': 0,
                 'error_count': 0
             }
-        
+
         try:
             # 배치 데이터 준비
             batch_data = []
@@ -371,17 +371,13 @@ class SensorDataRepository:
             
         except Exception as e:
             logger.error(f"배치 센서 데이터 저장 실패: {e}")
-            # 실패 시 CSV 백업 로직 호출
-            self.backup_data_to_csv(sensor_data_list)
-            return {
-                'total_count': len(sensor_data_list),
-                'success_count': 0,
-                'error_count': len(sensor_data_list)
-            }
+            # 중복 백업 방지: 예외를 다시 발생시켜 상위 호출자가 재시도 로직을 처리하도록 함
+            raise
 
     def backup_data_to_csv(self, sensor_data_list: List[RSDSensorData]) -> str:
         """
         저장 실패한 센서 데이터를 CSV 파일로 백업합니다.
+        하루에 발생한 백업은 같은 파일에 추가(append)됩니다.
 
         Args:
             sensor_data_list: 백업할 센서 데이터 리스트
@@ -392,22 +388,28 @@ class SensorDataRepository:
         if not sensor_data_list:
             return ""
 
-        backup_dir = "backup_data"
+        backup_dir = "backup"  # 저장 폴더를 'backup'으로 변경
         try:
             os.makedirs(backup_dir, exist_ok=True)
 
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            file_path = os.path.join(backup_dir, f"backup_{timestamp}.csv")
+            # 파일명 형식 변경: backup_data_YYMMDD.csv
+            date_str = datetime.now().strftime("%y%m%d")
+            file_path = os.path.join(backup_dir, f"backup_data_{date_str}.csv")
+
+            # 파일이 이미 존재하면 헤더를 쓰지 않음
+            write_header = not os.path.exists(file_path)
+            open_mode = 'a' if not write_header else 'w'
 
             header = [
-                'timestamp', 'string_id', 'rsd_id', 'channel_no', 
-                'temperature', 'current', 'is_arc', 'arc_frequency', 
+                'timestamp', 'string_id', 'rsd_id', 'channel_no',
+                'temperature', 'current', 'is_arc', 'arc_frequency',
                 'arc_count', 'rsd_status'
             ]
 
-            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+            with open(file_path, open_mode, newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(header)
+                if write_header:
+                    writer.writerow(header)
 
                 for data in sensor_data_list:
                     for channel in data.channels:
@@ -425,7 +427,8 @@ class SensorDataRepository:
                         ]
                         writer.writerow(row)
 
-            logger.info(f"데이터 백업 성공: {len(sensor_data_list)}개 RSD 데이터 -> {file_path}")
+            log_action = "생성" if write_header else "추가"
+            logger.info(f"데이터 백업 {log_action} 성공: {len(sensor_data_list)}개 RSD 데이터 -> {file_path}")
             return file_path
 
         except Exception as e:
@@ -476,14 +479,15 @@ class SensorDataRepository:
 
     async def process_pending_backups(self) -> Dict[str, Any]:
         """
-        'backup_data' 디렉터리의 모든 CSV 파일을 처리하여 DB에 저장합니다.
+        'backup' 디렉터리의 모든 데이터 CSV 파일을 처리하여 DB에 저장합니다.
         성공 시 CSV 파일을 삭제하고, 실패 시 그대로 둡니다.
         """
-        backup_dir = "backup_data"
+        backup_dir = "backup" # 백업 디렉터리를 'backup'으로 변경
         if not os.path.exists(backup_dir):
             return {'processed': 0, 'success': 0, 'failed': 0}
 
-        csv_files = [f for f in os.listdir(backup_dir) if f.endswith('.csv')]
+        # backup_data_*.csv 파일만 대상으로 함
+        csv_files = [f for f in os.listdir(backup_dir) if f.startswith('backup_data_') and f.endswith('.csv')]
         if not csv_files:
             return {'processed': 0, 'success': 0, 'failed': 0}
 
@@ -491,7 +495,7 @@ class SensorDataRepository:
         success_count = 0
         failed_count = 0
 
-        logger.info(f"DB에 저장되지 않은 백업 파일 {total_files}개를 발견했습니다. 복구를 시작합니다.")
+        logger.info(f"DB에 저장되지 않은 데이터 백업 파일 {total_files}개를 발견했습니다. 복구를 시작합니다.")
 
         for file_name in csv_files:
             file_path = os.path.join(backup_dir, file_name)
@@ -537,7 +541,6 @@ class SensorDataRepository:
                 failed_count += 1
 
         return {'processed': total_files, 'success': success_count, 'failed': failed_count}
-
 
 # =============================================================================
 # 장치 정보 저장소 클래스
@@ -704,8 +707,7 @@ class AlertRepository:
         Args:
             connection: 데이터베이스 연결
         """
-        self.connection = connection
-        self._current_log_backup_path: Optional[str] = None
+        self.connection = connection        
     
     async def _attempt_save_alert(self, alert: AlertData) -> None:
         """
@@ -726,11 +728,12 @@ class AlertRepository:
             alert.reg_date
         )
 
+
     async def save_alert(self, string_id: Optional[int], rsd_id: Optional[int], log_type: int,
-                    description: str, channel_no: Optional[int] = None,
-                    event_time: Optional[datetime] = None) -> bool:
+                     description: str, channel_no: Optional[int] = None,
+                     event_time: Optional[datetime] = None) -> bool:
         """
-        알림 저장 (재시도, 백업, 시간 지정 로직 추가)
+        알림 저장 (충돌 방지를 위해 재시도 없이 1회만 시도하고, DB 상태를 먼저 확인)
         
         Args:
             string_id: String ID
@@ -758,37 +761,40 @@ class AlertRepository:
             channel_no=channel_no
         )
 
-        # 1. 1차 저장 시도
+        # DB 연결이 끊어진 상태면 처음부터 백업으로 처리
+        if not self.connection.is_connected:
+            try:
+                file_path = self.backup_alerts_to_csv([alert_data])
+                if file_path:
+                    logger.info(f"알림 백업 저장 성공 -> {file_path}")
+                    return True
+                else:
+                    logger.error("알림 백업 저장 실패")
+                    return False
+            except Exception as e:
+                logger.error(f"알림 백업 중 예외 발생: {e}")
+                return False
+
+        # DB 연결이 있을 때만 DB 저장 시도 (재시도 없음)
         try:
             await self._attempt_save_alert(alert_data)
             logger.info(f"알림 저장 완료 - String {string_id}, RSD {rsd_id}: {description}")
             return True
         except Exception as e:
-            logger.warning(f"알림 저장 1차 실패, 재시도합니다. 오류: {e}")
-
-        # 2. 재시도 (1회)
-        await asyncio.sleep(0.5)
-        try:
-            await self._attempt_save_alert(alert_data)
-            logger.info(f"알림 저장 재시도 성공 - String {string_id}, RSD {rsd_id}: {description}")
-            return True
-        except Exception as e:
-            logger.error(f"알림 저장 재시도 실패. CSV 백업을 시도합니다. 오류: {e}")
-        
-        # 3. CSV 백업
-        try:
-            # 자체 백업 함수를 사용하도록 수정
-            file_path = self.backup_alerts_to_csv([alert_data])
-            if file_path:
-                logger.info(f"알림 데이터 백업 성공 -> {file_path}")
-                return True
-            else:
-                logger.error("치명적 오류: 알림 데이터 CSV 백업마저 실패했습니다.")
+            # 실패 시 바로 백업으로 처리 (재시도 없음)
+            logger.warning(f"알림 DB 저장 실패, 백업 처리: {e}")
+            try:
+                file_path = self.backup_alerts_to_csv([alert_data])
+                if file_path:
+                    logger.info(f"알림 백업 저장 성공 -> {file_path}")
+                    return True
+                else:
+                    logger.error("치명적 오류: 알림 백업마저 실패했습니다.")
+                    return False
+            except Exception as backup_e:
+                logger.error(f"알림 백업 중 예외 발생: {backup_e}")
                 return False
-        except Exception as e:
-            logger.error(f"알림 데이터 CSV 백업 중 예외 발생: {e}")
-            return False
-    
+
     async def save_arc_alert(self, string_id: int, rsd_id: int, channel_no: int, 
                         arc_frequency: int, arc_count: int,
                         event_time: Optional[datetime] = None) -> bool:
@@ -852,31 +858,27 @@ class AlertRepository:
         description = f"통신 오류: {error_message}"
         return await self.save_alert(string_id, rsd_id, 2, description, event_time=event_time)
     
-    async def save_system_error_alert(self, component: str, error_message: str, 
-                                string_id: Optional[int] = None, 
+    async def save_system_error_alert(self, component: str, error_message: str,
+                                string_id: Optional[int] = None,
                                 rsd_id: Optional[int] = None,
                                 event_time: Optional[datetime] = None) -> bool:
         """
-        시스템 오류 알림 저장 (이벤트 시간 전달 기능 추가)
-        
-        Args:
-            component: 오류 발생 컴포넌트
-            error_message: 오류 메시지
-            string_id: String ID (선택사항)
-            rsd_id: RSD ID (선택사항)
-            event_time: 이벤트 발생 시간
-            
-        Returns:
-            저장 성공 여부
+        시스템 오류 알림 저장 (string_id, rsd_id가 None일 경우 0으로 처리)
         """
         description = f"[{component}] {error_message}"
         log_type = 3  # 시스템 오류
-        return await self.save_alert(string_id, rsd_id, log_type, description, event_time=event_time)
+        
+        # string_id와 rsd_id가 None일 경우 0으로 저장하여 DB 제약조건 위반 방지
+        save_string_id = string_id if string_id is not None else 0
+        save_rsd_id = rsd_id if rsd_id is not None else 0
+        
+        return await self.save_alert(save_string_id, save_rsd_id, log_type, description, event_time=event_time)
+
 
     def backup_alerts_to_csv(self, alerts_to_backup: List[AlertData]) -> str:
         """
-        저장 실패한 알림 데이터를 CSV 파일로 백업
-        한 세션에서는 하나의 파일에 계속 추가
+        저장 실패한 알림 데이터를 CSV 파일로 백업합니다.
+        하루에 발생한 백업은 같은 파일에 추가(append)됩니다.
 
         Args:
             alerts_to_backup: 백업할 알림 데이터 리스트
@@ -887,22 +889,17 @@ class AlertRepository:
         if not alerts_to_backup:
             return ""
 
-        backup_dir = "backup_logs"
+        backup_dir = "backup"  # 저장 폴더를 'backup'으로 변경
         try:
             os.makedirs(backup_dir, exist_ok=True)
 
-            # 현재 세션에서 사용 중인 백업 파일이 있는지 확인
-            if self._current_log_backup_path and os.path.exists(self._current_log_backup_path):
-                file_path = self._current_log_backup_path
-                write_header = False
-                open_mode = 'a'
-            else:
-                # 새 세션 또는 첫 백업 시 새 파일 생성
-                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                file_path = os.path.join(backup_dir, f"backup_log_{timestamp}.csv")
-                self._current_log_backup_path = file_path # 현재 세션 파일 경로 저장
-                write_header = True
-                open_mode = 'w'
+            # 파일명 형식 변경: backup_log_YYMMDD.csv
+            date_str = datetime.now().strftime("%y%m%d")
+            file_path = os.path.join(backup_dir, f"backup_log_{date_str}.csv")
+
+            # 파일 존재 여부에 따라 헤더 작성 결정
+            write_header = not os.path.exists(file_path)
+            open_mode = 'a' if not write_header else 'w'
 
             header = [
                 'reg_date', 'string_id', 'rsd_id', 'log_type', 'log_title',
@@ -926,7 +923,7 @@ class AlertRepository:
                     ]
                     writer.writerow(row)
 
-            log_action = "추가" if open_mode == 'a' else "생성"
+            log_action = "생성" if write_header else "추가"
             logger.info(f"로그 데이터 백업 {log_action} 성공: {len(alerts_to_backup)}개 알림 -> {file_path}")
             return file_path
 
@@ -959,14 +956,15 @@ class AlertRepository:
 
     async def process_pending_log_backups(self) -> Dict[str, Any]:
         """
-        'backup_logs' 디렉터리의 모든 CSV 파일을 처리하여 DB에 저장합니다.
+        'backup' 디렉터리의 모든 로그 CSV 파일을 처리하여 DB에 저장합니다.
         성공 시 CSV 파일을 삭제하고, 실패 시 그대로 둡니다.
         """
-        backup_dir = "backup_logs"
+        backup_dir = "backup" # 백업 디렉터리를 'backup'으로 변경
         if not os.path.exists(backup_dir):
             return {'processed': 0, 'success': 0, 'failed': 0}
 
-        csv_files = [f for f in os.listdir(backup_dir) if f.endswith('.csv')]
+        # backup_log_*.csv 파일만 대상으로 함
+        csv_files = [f for f in os.listdir(backup_dir) if f.startswith('backup_log_') and f.endswith('.csv')]
         if not csv_files:
             return {'processed': 0, 'success': 0, 'failed': 0}
 

@@ -468,13 +468,14 @@ class CommunicationManager:
 
     async def save_collected_data(self, sensor_data_list: List[RSDSensorData]) -> int:
         """
-        수집된 데이터를 데이터베이스에 저장 (Repository를 통해)
+        수집된 데이터를 데이터베이스에 저장합니다.
+
         Returns:
             저장된 레코드 개수
         """
         if not sensor_data_list:
             return 0
-            
+
         try:
             # Repository를 통해 배치 저장
             result = await self.sensor_repository.save_sensor_data_batch(sensor_data_list)
@@ -495,12 +496,6 @@ class CommunicationManager:
         except Exception as e:
             if self.log_manager:
                 self.log_manager.error_log("데이터저장", f"데이터 저장 실패: {e}")
-            # DB 저장 오류 발생 시 알림 저장
-            if self.alert_repository:
-                await self.alert_repository.save_system_error_alert(
-                    component="Database", 
-                    error_message=f"DB 저장 실패: {str(e)}"
-                )
             return 0
 
     async def save_sensor_data_batch(self, sensor_data_list: List[RSDSensorData]) -> Dict[str, int]:
