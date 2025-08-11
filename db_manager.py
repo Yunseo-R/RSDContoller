@@ -1,7 +1,8 @@
 """
 RSD 모니터링 시스템 데이터베이스 관리자
-PostgreSQL 연결, 기기 목록, 센싱값 데이터, 아크 알림 관리
-미완성 메서드들 완성 및 안정성 개선
+- 데이터베이스(PostgreSQL) 연결 및 상태 관리
+- 센서 데이터, 장치 정보, 알림 로그의 CRUD(생성, 읽기, 갱신, 삭제) 처리
+- DB 장애 시 데이터 백업 및 복구 기능
 """
 
 import asyncio
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ChannelData:
-    """개별 채널 데이터"""
+    """개별 채널의 센싱 데이터"""
     channel_no: int
     temperature: float
     current: float
@@ -80,7 +81,11 @@ class AlertData:
 # =============================================================================
 
 class DatabaseConnection:
-    """데이터베이스 연결 관리"""
+    """데이터베이스 연결 Pool 관리 및 연결 상태 모니터링"""
+    # TODO
+    # : 현재 DB 연결 해제 후 복구 시 기본 풀 기능에 의존하고 있으므로 불안정.
+    # 기존 풀을 완전 종료 후 새 풀을 생성, 재연결 후 풀의 연결 상태 검증, 능동적 재연결 시도 등 
+    # 안정성 높은 연결 복구 관련 DB재연결 로직 구현 필요.
     
     def __init__(self, config: DatabaseConfig, reconnection_callback=None):
         """
@@ -88,7 +93,8 @@ class DatabaseConnection:
         
         Args:
             config: 데이터베이스 설정
-            reconnection_callback: 재연결 시 호출될 콜백 함수
+            reconnection_callback: [외부 콜백 수신] DB 연결 복구 시 호출될 콜백 함수.
+                                   - 콜백 제공자 (Provider): `DatabaseManager`
         """
         self.config = config
         self._pool: Optional[asyncpg.Pool] = None
@@ -97,7 +103,11 @@ class DatabaseConnection:
         self._monitoring_task: Optional[asyncio.Task] = None
     
     async def connect(self) -> bool:
-        """데이터베이스 연결"""
+        """데이터베이스 연결 풀 생성 및 연결 테스트"""
+
+        # TODO
+        # : 현재 풀 생성 시 asyncpg의 기본 설정만 사용하고 있어 재연결 상황에서 불안정할 수 있으므로,
+        # server_settings, setup/init 콜백 등 더 견고한 풀 설정 옵션 추가를 고려하여 연결 안정성 향상 예정
         try:
             dsn = f"postgresql://{self.config.username}:{self.config.password}@{self.config.host}:{self.config.port}/{self.config.database}"
             
@@ -108,14 +118,14 @@ class DatabaseConnection:
                 command_timeout=30
             )
             
-            # 연결 테스트
+            # 연결 테스트(실제 연결 유효성 검사)
             async with self._pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
             
             self.is_connected = True
             logger.info(f"데이터베이스 연결 성공: {self.config.host}:{self.config.port}")
             
-            # 연결 상태 모니터링 시작
+            # 연결 상태 모니터링(연결 상태를 주기적으로 체크하는 태스크 시작)
             self._start_connection_monitoring()
             
             return True
@@ -136,6 +146,7 @@ class DatabaseConnection:
                 except asyncio.CancelledError:
                     pass
             
+            # 연결 Pool 닫기
             if self._pool:
                 await self._pool.close()
                 self._pool = None
@@ -147,14 +158,18 @@ class DatabaseConnection:
             logger.error(f"데이터베이스 연결 해제 중 오류: {e}")
     
     def _start_connection_monitoring(self):
-        """연결 상태 모니터링 시작"""
+        """연결 상태 모니터링 태스트 시작"""
         if self._monitoring_task and not self._monitoring_task.done():
             return
         
         self._monitoring_task = asyncio.create_task(self._monitor_connection())
     
     async def _monitor_connection(self):
-        """연결 상태 모니터링"""
+        """연결 상태 모니터링. 상태 변경 시 콜백 호출"""
+        # TODO
+        # : 현재는 단순히 연결 상태 변화만 감지하고 콜백 호출하는 수동적 역할만 하고 있으나,
+        # 연속 실패 횟수 추적, 능동적 재연결 시도, 풀 강제 재생성 등 더 적극적인 복구 메커니즘 구현 예정
+        # 연속 실패 3회 초과 시 풀 재생성, 연결 끊김 지속 시 1분마다 능동적 재연결 시도하도록 로직 강화
         last_status = True
         
         while True:
@@ -167,6 +182,7 @@ class DatabaseConnection:
                     self.is_connected = current_status
                     if current_status:
                         logger.info("데이터베이스 연결이 복구되었습니다")
+                        # [외부 콜백 실행] 등록된 재연결 콜백(DatabaseManager의 _handle_reconnection)을 호출
                         if self._reconnection_callback:
                             logger.info("재연결 콜백을 호출합니다")
                             asyncio.create_task(self._reconnection_callback())
@@ -182,7 +198,7 @@ class DatabaseConnection:
                 logger.error(f"연결 상태 확인 중 오류: {e}")
 
     async def test_connection(self) -> bool:
-        """연결 테스트"""
+        """현재 연결 유효성 테스트"""
         try:
             if not self._pool:
                 return False
@@ -197,14 +213,11 @@ class DatabaseConnection:
     
     async def execute_query(self, query: str, *args) -> List[Dict[str, Any]]:
         """
-        SELECT 쿼리 실행
-        
+        SELECT 쿼리를 실행하고 결과를 딕셔너리 리스트로 반환
+
         Args:
-            query: SQL 쿼리
-            *args: 쿼리 파라미터
-            
-        Returns:
-            쿼리 결과
+            query: 실행할 SQL 쿼리 문자열
+            *args: 쿼리에 바인딩할 파라미터들
         """
         try:
             async with self._pool.acquire() as conn:
@@ -217,15 +230,16 @@ class DatabaseConnection:
     
     async def execute_command(self, query: str, *args) -> str:
         """
-        INSERT/UPDATE/DELETE 쿼리 실행
-        
+        INSERT, UPDATE, DELETE 류의 쿼리를 실행
+
         Args:
-            query: SQL 쿼리
-            *args: 쿼리 파라미터
-            
-        Returns:
-            실행 결과 상태
+            query: 실행할 SQL 쿼리 문자열
+            *args: 쿼리에 바인딩할 파라미터들
         """
+
+        # TODO
+        # : 현재는 연결 실패 시 바로 예외를 발생시키고 있어 일시적 네트워크 문제에 취약
+        # 추후 추가할 재연결 시 풀 재생성 관련 로직과 연동하여 자동 재시도 매커니즘 등을 추가 구현 필요
         try:
             if not self._pool:
                 raise ConnectionError("데이터베이스 풀이 초기화되지 않았습니다")
@@ -244,11 +258,11 @@ class DatabaseConnection:
 
     async def execute_many(self, query: str, args_list: List[tuple]) -> None:
         """
-        배치 명령 실행
-        
+        Batch 명령 실행
+
         Args:
-            query: SQL 쿼리
-            args_list: 파라미터 리스트
+            query: 실행할 SQL 쿼리 문자열
+            args_list: 쿼리에 바인딩할 파라미터들의 리스트
         """
         try:
             if not self._pool:
@@ -268,6 +282,7 @@ class DatabaseConnection:
 
 # =============================================================================
 # 센서 데이터 저장소 클래스
+# - TB_RSD_DATA3 테이블과 관련된 모든 데이터 처리를 담당
 # =============================================================================
 
 class SensorDataRepository:
@@ -278,7 +293,7 @@ class SensorDataRepository:
         센서 데이터 저장소 초기화
         
         Args:
-            connection: 데이터베이스 연결
+            connection: 데이터베이스 연결 객체
         """
         self.connection = connection
     
@@ -287,7 +302,7 @@ class SensorDataRepository:
         센서 데이터 저장
         
         Args:
-            sensor_data: 저장할 센서 데이터
+            sensor_data: 저장할 단일 센서 데이터
             
         Returns:
             저장 성공 여부
@@ -333,7 +348,7 @@ class SensorDataRepository:
             sensor_data_list: 저장할 센서 데이터 리스트
             
         Returns:
-            저장 결과 딕셔너리 (success_count, error_count, total_count)
+            성공, 실패, 전체 카운트가 포함된 저장 결과 딕셔너리 (success_count, error_count, total_count)
         """
         if not sensor_data_list:
             return {
@@ -381,7 +396,7 @@ class SensorDataRepository:
         except Exception as e:
             logger.error(f"센서 데이터 배치 저장 실패: {e}")
             error_count = total_count
-            raise  # 호출자가 백업 처리할 수 있도록 예외 전파
+            raise  # MonitoringThread._save_data_with_retry_and_backup에서 예외 감지. 백업 시도.
         
         return {
             'success_count': success_count,
@@ -405,10 +420,12 @@ class SensorDataRepository:
         backup_dir = "backup"
         try:
             os.makedirs(backup_dir, exist_ok=True)
-
+            
+            # 파일명은 'backup_data_YYMMDD.csv'
             date_str = datetime.now().strftime("%y%m%d")
             file_path = os.path.join(backup_dir, f"backup_data_{date_str}.csv")
 
+            # 파일이 없으면 헤더를 쓰고, 있으면 데이터를 append
             write_header = not os.path.exists(file_path)
             open_mode = 'a' if not write_header else 'w'
 
@@ -449,8 +466,11 @@ class SensorDataRepository:
 
     def _parse_csv_to_sensor_data(self, file_path: str) -> List[RSDSensorData]:
         """
-        CSV 파일을 파싱하여 RSDSensorData 리스트로 변환
+        CSV 파일을 파싱하여 RSDSensorData 객체 리스트로 변환
         동일한 타임스탬프, string_id, rsd_id를 가진 row들을 하나의 RSDSensorData로 그룹화
+
+        Args:
+            file_path: 파싱할 CSV 파일의 경로
         """
         grouped_data = {}
         try:
@@ -468,6 +488,7 @@ class SensorDataRepository:
                             'channels': []
                         }
 
+                    # 해당 키에 채널 데이터 추가
                     grouped_data[key]['channels'].append(ChannelData(
                         channel_no=int(row['channel_no']),
                         temperature=float(row['temperature']),
@@ -489,6 +510,7 @@ class SensorDataRepository:
     async def process_pending_backups(self) -> Dict[str, int]:
         """
         백업 디렉터리의 모든 데이터 CSV 파일을 DB로 복구
+        복구 성공 시 해당 CSV 파일을 삭제
         """
         backup_dir = "backup"
         if not os.path.exists(backup_dir):
@@ -515,6 +537,7 @@ class SensorDataRepository:
                 continue
 
             is_saved = False
+            # DB 저장을 최대 2회 시도
             for attempt in range(1, 3):
                 try:
                     logger.info(f"DB 저장 시도 #{attempt} (대상: {file_name})")
@@ -565,10 +588,10 @@ class DeviceRepository:
     
     async def get_active_strings(self) -> List[StringInfo]:
         """
-        활성 String 목록 조회
+        사용 중(use_yn='Y')인 모든 String의 정보를 조회
         
         Returns:
-            활성 String 정보 리스트
+            활성 StringInfo 객체 리스트
         """
         try:
             query = """
@@ -597,13 +620,13 @@ class DeviceRepository:
     
     async def get_active_devices_by_string(self, string_id: int) -> List[DeviceInfo]:
         """
-        특정 String의 활성 RSD 목록 조회
+        특정 String에 속한 장치 중, 사용 중(use_yn='Y')인 모든 RSD 장치 목록을 조회
         
         Args:
             string_id: String ID
             
         Returns:
-            RSD 장치 정보 리스트
+            해당 String에 속한 활성화된 DeviceInfo 객체 리스트
         """
         try:
             query = """
@@ -632,10 +655,10 @@ class DeviceRepository:
     
     async def get_all_active_devices(self) -> List[DeviceInfo]:
         """
-        모든 활성 RSD 목록 조회
+        시스템에 등록된 모든 RSD 장치 중, 사용 중(use_yn='Y')인 장치 목록을 한번에 조회
         
         Returns:
-            모든 RSD 장치 정보 리스트
+            시스템의 모든 활성화된 DeviceInfo 객체 리스트
         """
         try:
             query = """
@@ -670,7 +693,7 @@ class DeviceRepository:
             string_id: String ID
             
         Returns:
-            String 정보 또는 None
+            조회된 StringInfo 객체 또는 None
         """
         try:
             query = """
@@ -700,6 +723,7 @@ class DeviceRepository:
 
 # =============================================================================
 # 알림 저장소 클래스
+#  - TB_ALERT_LOG3 테이블과 관련된 모든 데이터 처리를 담당
 # =============================================================================
 
 class AlertRepository:
@@ -717,7 +741,10 @@ class AlertRepository:
     async def _attempt_save_alert(self, alert: AlertData) -> None:
         """
         실제 DB에 알림 저장을 시도하는 내부 메서드
-        실패 시 예외를 발생시킵니다
+        주어진 AlertData 객체를 실제 DB에 저장하고, 실패 시 예외를 발생시킴.
+
+        Args:
+            alert: 저장할 알림 데이터 객체
         """
         insert_query = """
         INSERT INTO TB_ALERT_LOG3 (
@@ -737,6 +764,7 @@ class AlertRepository:
     def _is_valid_device_alert(self, string_id: Optional[int], rsd_id: Optional[int]) -> bool:
         """
         특정 기기와 관련된 유효한 알림인지 확인
+        string_id와 rsd_id가 모두 유효한 값(0보다 큰 정수)을 가질 때만 특정 기기와 관련된 알림으로 판단
         
         Args:
             string_id: String ID
@@ -758,20 +786,22 @@ class AlertRepository:
                      description: str, channel_no: Optional[int] = None,
                      event_time: Optional[datetime] = None) -> bool:
         """
-        알림 저장 (특정 기기와 관련되지 않은 알림은 DB 저장하지 않음)
+        알림을 저장하는 메인 메서드
+        - 특정 기기와 관련된 알림(string_id, rsd_id 유효)만 DB 저장
+        - DB 저장 실패 시 CSV 백업으로 전환하여 데이터 유실을 방지
         
         Args:
             string_id: String ID
             rsd_id: RSD ID
             log_type: 알림 타입 (1: 아크 발생, 2: 통신 오류, 3: 시스템 오류)
             description: 알림 설명
-            channel_no: 채널 번호 (선택사항)
+            channel_no: 채널 번호
             event_time: 이벤트 발생 시간 (None이면 현재 시간 사용)
             
         Returns:
-            저장 성공 여부 (유효하지 않은 알림은 항상 True 반환)
+            저장 또는 백업 성공 시 True, 최종 실패 시 False
         """
-        # 특정 기기와 관련되지 않은 알림은 DB에 저장하지 않음
+        # 특정 기기와 관련되지 않은 알림은 DB에 저장하지 않고 로그만 출력
         if not self._is_valid_device_alert(string_id, rsd_id):
             logger.info(f"시스템 알림 (DB 저장 제외): String {string_id}, RSD {rsd_id}: {description}")
             return True
@@ -872,8 +902,8 @@ class AlertRepository:
         Args:
             component: 컴포넌트 이름
             error_message: 오류 메시지
-            string_id: String ID (선택사항)
-            rsd_id: RSD ID (선택사항)
+            string_id: String ID
+            rsd_id: RSD ID
             event_time: 이벤트 발생 시간
             
         Returns:
@@ -886,13 +916,10 @@ class AlertRepository:
         
     async def get_recent_alerts(self, limit: int = 100) -> List[Dict[str, Any]]:
         """
-        최근 알림 목록 조회
-        
+        최근 알림을 지정된 개수만큼 조회
+
         Args:
             limit: 조회할 알림 수
-            
-        Returns:
-            알림 리스트
         """
         try:
             query = """
@@ -963,8 +990,10 @@ class AlertRepository:
 
     def _parse_csv_to_alert_data(self, file_path: str) -> List[AlertData]:
         """
-        로그 CSV 파일을 파싱하여 AlertData 리스트로 변환
-        유효하지 않은 기기 정보가 있는 알림은 제외
+        백업된 로그 CSV 파일을 파싱하여 AlertData 객체 리스트로 변환
+
+        Args:
+            file_path: 파싱할 CSV 파일의 경로
         """
         try:
             alerts = []
@@ -1008,10 +1037,7 @@ class AlertRepository:
             return []
 
     async def restore_alerts_from_csv_backups(self) -> Dict[str, int]:
-        """
-        백업된 로그 CSV 파일들을 DB로 복구
-        유효하지 않은 기기 정보가 있는 알림은 자동으로 제외
-        """
+        """백업된 로그 CSV 파일들을 DB로 복구, 성공 시 파일을 삭제"""
         backup_dir = "backup"
         
         if not os.path.exists(backup_dir):
@@ -1077,19 +1103,21 @@ class AlertRepository:
 class DatabaseManager:
     """데이터베이스 매니저 - 모든 저장소를 통합 관리하는 팩토리 클래스"""
     
+    
     def __init__(self, config: DatabaseConfig):
         """
         데이터베이스 매니저 초기화
         
         Args:
-            config: 데이터베이스 설정
+            config: 데이터베이스 접속 정보가 담긴 설정 객체
         """
         self.config = config
-        self._status_callback: Optional[callable] = None
-        # 내부 핸들러를 DatabaseConnection에 전달
+        # 외부(MonitoringThread)에서 주입될 콜백을 저장하는 변수
+        self._status_callback: Optional[callable] = None   
+         # DatabaseConnection 객체 생성 시, 내부 핸들러(_handle_reconnection)를 콜백으로 전달   
         self.connection = DatabaseConnection(config, self._handle_reconnection)
         
-        # 저장소들 (연결 후에 생성됨)
+        # 저장소들 (initialize() 호출 시 생성됨)
         self.sensor_repository: Optional[SensorDataRepository] = None
         self.device_repository: Optional[DeviceRepository] = None
         self.alert_repository: Optional[AlertRepository] = None
@@ -1100,7 +1128,7 @@ class DatabaseManager:
 
     async def initialize(self) -> bool:
         """
-        데이터베이스 매니저 초기화 및 저장소 생성
+        데이터베이스 매니저 초기화 및 각 데이터 저장소(Repository) 생성
         
         Returns:
             초기화 성공 여부
@@ -1123,7 +1151,12 @@ class DatabaseManager:
         return True
 
     def set_disconnection_flag(self, status: bool):
-        """DB 연결 끊김 상태 플래그를 설정합니다"""
+        """
+        DB 연결 끊김 상태 플래그 설정
+
+        Args:
+            status: 설정할 연결 상태 (True: 끊김, False: 연결됨)
+        """
         if status and not self._db_was_disconnected:
             logger.warning("DB 연결이 끊어진 것으로 감지되었습니다. 이후 DB 쓰기 실패 시 데이터는 백업됩니다")
         self._db_was_disconnected = status
@@ -1144,7 +1177,9 @@ class DatabaseManager:
 
     def set_status_callback(self, callback: callable):
         """
-        DB 재연결 시 실행될 콜백 함수를 등록합니다
+        DB 재연결 시 실행될 외부 콜백 함수를 등록
+        - 콜백 제공자 : MonitoringThread._handle_db_reconnection (in rsd_monitoring_app.py)
+        - 콜백 호출 시점 : DB 연결이 끊겼다가 다시 복구되었을 때
         
         Args:
             callback: 재연결 시 실행할 비동기 콜백 함수
@@ -1154,20 +1189,21 @@ class DatabaseManager:
 
     async def _handle_reconnection(self):
         """
-        DatabaseConnection으로부터 재연결 신호를 받았을 때 처리하는 내부 메서드
-        등록된 외부 콜백을 호출합니다
+        [내부 핸들러] DatabaseConnection으로부터 재연결 신호를 받아 처리
+        이 메서드는 `DatabaseConnection`의 `_monitor_connection` 루프에서 호출
+        등록된 외부 콜백(`_status_callback`)이 있다면, 이를 실행시켜 외부에 재연결 이벤트를 전달
+
+        TODO
+        : DB의 상태를 확인하고 그에 따른 백업/복구 로직을 호출하는 주체가 외부 클래스(rsd_monitoring_app.py)에 있어 역할이 분산되고 있으므로,
+        현재는 외부 콜백을 호출하는 역할만 하는 해당 메서드가 추후 DB 복구 로직을 직접 컨트롤하도록 변경할 예정
+        이 메서드에서 직접 백업 처리 로직을 호출하도록 리팩토링 하고, 추후 외부 콜백을 받는 set_status_callback를 제거 예정
         """
         if self._status_callback:
             # 등록된 외부 콜백이 있으면 비동기적으로 실행
             asyncio.create_task(self._status_callback())
 
     async def process_pending_log_backups(self) -> Dict[str, int]:
-        """
-        백업된 로그 파일 처리 (AlertRepository로 위임)
-        
-        Returns:
-            처리 결과
-        """
+        """백업된 로그 파일의 복구를 AlertRepository에 위임"""
         if not self.alert_repository:
             logger.error("AlertRepository가 초기화되지 않았습니다")
             return {'processed': 0, 'success': 0, 'failed': 0}
@@ -1175,18 +1211,14 @@ class DatabaseManager:
         return await self.alert_repository.restore_alerts_from_csv_backups()
 
     async def process_pending_data_backups(self) -> Dict[str, int]:
-        """
-        백업된 센서 데이터 파일 처리 (SensorDataRepository로 위임)
-        
-        Returns:
-            처리 결과
-        """
+        """백업된 센서 데이터 파일의 복구를 SensorDataRepository에 위임"""
         if not self.sensor_repository:
             logger.error("SensorDataRepository가 초기화되지 않았습니다")
             return {'processed': 0, 'success': 0, 'failed': 0}
         
         return await self.sensor_repository.process_pending_backups()
     
+    # ----------------- 컴포넌트 Getter 메서드 -----------------
     def get_sensor_repository(self) -> Optional[SensorDataRepository]:
         """센서 데이터 저장소 반환"""
         if not self._is_initialized:
@@ -1213,9 +1245,9 @@ class DatabaseManager:
         return self.connection
     
     async def test_connection(self) -> bool:
-        """연결 테스트"""
+        """현재 DB 연결 상태 테스트"""
         return await self.connection.test_connection()
     
     def is_initialized(self) -> bool:
-        """초기화 상태 확인"""
+        """데이터베이스 매니저의 초기화 여부를 반환"""
         return self._is_initialized

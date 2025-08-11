@@ -1,7 +1,6 @@
 """
-RSD String 관리 및 통신 테스트 모듈
-TCP를 통한 RS485 통신으로 RSD 기기와 연결 테스트
-기기 목록 구성과 테스트 통신만 담당
+RSD String 정보 관리 및 통신 연결 테스트
+DB에서 String/RSD 장치 정보를 로드하고 관리
 """
 
 import socket
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RSDTestResult:
-    """RSD 테스트 결과 클래스 (연결 테스트만)"""
+    """"RSD 연결 테스트 결과를 저장"""
     string_id: int
     rsd_id: int
     is_success: bool
@@ -33,7 +32,7 @@ class RSDTestResult:
 
 
 # =============================================================================
-# RSD 프로토콜 처리 클래스 (테스트용)
+# RSD 프로토콜 처리 클래스 (연결 테스트용)
 # =============================================================================
 
 class RSDProtocol:
@@ -45,7 +44,12 @@ class RSDProtocol:
     
     @staticmethod
     def calculate_checksum(data: bytes) -> int:
-        """체크섬 계산 (하위 8비트)"""
+        """
+        체크섬 계산 (하위 8비트)
+
+        Args:
+            data: 체크섬을 계산할 바이트 데이터
+        """
         return sum(data) & 0xFF
     
     @classmethod
@@ -54,11 +58,11 @@ class RSDProtocol:
         RSD 데이터 읽기 요청 패킷 생성
         
         Args:
-            slave_addr: 슬레이브 주소 (RSD ID)
+            slave_addr: RSD ID
             channel_no: 채널 번호 (0=모든 채널)
             
         Returns:
-            요청 패킷 바이트
+            생성된 요청 패킷 (bytes)
         """
         data = struct.pack('B', channel_no)
         data_length = len(data)
@@ -77,16 +81,16 @@ class RSDProtocol:
     @classmethod
     def validate_response_header(cls, response_data: bytes) -> bool:
         """
-        응답 패킷 헤더 검증 (테스트용 - 데이터 파싱하지 않음)
+        응답 패킷 헤더 검증 (테스트용)
         
         Args:
-            response_data: 응답 패킷 바이트
+            response_data: 응답 패킷 (bytes)
             
         Returns:
-            헤더 유효성 여부
+            패킷이 유효하면 True, 그렇지 않으면 False
         """
         try:
-            # 최소 패킷 길이 검증 (헤더 4바이트 + 최소 데이터 + 체크섬 1바이트)
+            # 최소 패킷 길이(헤더 4 + 체크섬 1 = 5) 검증
             if len(response_data) < 5:
                 logger.debug("응답 패킷 길이 부족")
                 return False
@@ -140,14 +144,19 @@ class RSDProtocol:
 # =============================================================================
 
 class StringManager:
-    """String 관리 클래스 - String 정보 관리 전담"""
+    """String 장치 정보 관리 클래스"""
     
     def __init__(self):
-        """String 관리자 초기화"""
         self.device_repository = None
         self.strings = {}
     
     def set_device_repository(self, device_repository):
+        """
+        DB 조회를 위한 DeviceRepository를 설정(의존성 주입)
+
+        Args:
+            device_repository: DeviceRepository 객체
+        """
         self.device_repository = device_repository
     
     async def load_active_strings(self) -> List[StringInfo]:
@@ -180,7 +189,12 @@ class StringManager:
             return []
     
     async def get_string_by_id(self, string_id: int) -> Optional[StringInfo]:
-        """String ID로 String 정보 조회"""
+        """
+        String ID로 String 정보 조회
+
+        Args:
+            string_id: 조회할 String ID
+        """
         # 캐시에서 먼저 확인
         if string_id in self.strings:
             return self.strings[string_id]
@@ -208,7 +222,12 @@ class StringManager:
             return None
     
     def add_string(self, string_info: StringInfo):
-        """String 정보 추가"""
+        """
+        String 정보 추가
+
+        Args:
+            string_info: 추가할 StringInfo 객체
+        """
         self.strings[string_info.string_id] = string_info
 
 
@@ -217,18 +236,28 @@ class StringManager:
 # =============================================================================
 
 class RSDManager:
-    """RSD 관리 클래스 - RSD 정보 관리 전담"""
+    """RSD 장치 정보 관리 클래스"""
     
     def __init__(self):
-        """RSD 관리자 초기화"""
         self.device_repository = None
         self.devices = {}
     
     def set_device_repository(self, device_repository):
+        """
+        DB 조회를 위한 DeviceRepository를 설정(의존성 주입)
+
+        Args:
+            device_repository: DeviceRepository 객체
+        """
         self.device_repository = device_repository
     
     async def load_rsds_by_string(self, string_id: int) -> List[DeviceInfo]:
-        """특정 String의 RSD 목록 로드"""
+        """
+        특정 String의 RSD 목록 로드
+
+        Args:
+            string_id: 조회할 String ID
+        """
         if not self.device_repository:
             logger.error("Device repository가 설정되지 않았습니다")
             return []
@@ -252,7 +281,13 @@ class RSDManager:
             return []
     
     async def get_rsd_by_id(self, string_id: int, rsd_id: int) -> Optional[DeviceInfo]:
-        """RSD ID로 RSD 정보 조회"""
+        """
+        RSD ID로 RSD 정보 조회
+
+        Args:
+            string_id: RSD가 속한 String ID
+            rsd_id: 조회할 RSD ID
+        """
         try:
             devices = await self.device_repository.get_active_devices_by_string(string_id)
             for device in devices:
@@ -273,7 +308,13 @@ class RSDManager:
             return None
     
     def add_device(self, device_info: DeviceInfo):
-        """RSD 정보 추가"""
+        """
+        RSD ID로 RSD 정보 조회
+
+        Args:
+            string_id: RSD가 속한 String ID
+            rsd_id: 조회할 RSD ID
+        """
         key = f"{device_info.string_id}_{device_info.rsd_id}"
         self.devices[key] = device_info
 
@@ -291,7 +332,7 @@ class RSDTestManager:
         
         Args:
             config: 설정 관리자
-            alert_repository: 알림 저장소 (선택사항)
+            alert_repository: 알림 저장소
         """
         self.config = config
         self.protocol = RSDProtocol()
@@ -300,25 +341,25 @@ class RSDTestManager:
     async def test_rsd_connection(self, string_info: StringInfo, rsd_id: int, 
                                 enable_retry: bool = False, retry_count: int = 1) -> RSDTestResult:
         """
-        단일 RSD 연결 테스트 수행 (재시도 로직 추가)
+        단일 RSD 연결 테스트 수행
         
         Args:
             string_info: String 정보
             rsd_id: RSD ID
-            enable_retry: 재시도 활성화 여부 (기본값: False - 기존 동작 유지)
+            enable_retry: 재시도 활성화 여부
             retry_count: 재시도 횟수 (기본값: 1)
             
         Returns:
             테스트 결과
         """
-        # 첫 번째 시도 (기존 코드 유지)
+        # 첫 번째 시도
         first_result = await self._perform_single_test(string_info, rsd_id)
         
         # 재시도가 비활성화되어 있거나 첫 시도가 성공하면 기존 동작
         if not enable_retry or first_result.is_success:
             return first_result
         
-        # 재시도 로직 (새로운 기능)
+        # 재시도 로직
         logger.info(f"String {string_info.string_id}, RSD {rsd_id} 첫 시도 실패, {retry_count}회 재시도 수행")
         
         retry_results = [first_result]
@@ -357,12 +398,12 @@ class RSDTestManager:
     async def test_string_devices(self, string_info: StringInfo, device_list: List[DeviceInfo],
                                 enable_retry: bool = False, retry_count: int = 1) -> List[RSDTestResult]:
         """
-        특정 String의 모든 RSD 장치 테스트 (재시도 기능 추가)
+        특정 String의 모든 RSD 장치 테스트
         
         Args:
             string_info: String 정보
             device_list: 테스트할 RSD 장치 목록
-            enable_retry: 재시도 활성화 여부 (기본값: False - 기존 동작 유지)
+            enable_retry: 재시도 활성화 여부
             retry_count: 재시도 횟수 (기본값: 1)
             
         Returns:
@@ -429,12 +470,12 @@ class RSDTestManager:
     async def test_all_strings(self, string_manager: StringManager, rsd_manager: RSDManager,
                              enable_retry: bool = False, retry_count: int = 1) -> Dict[int, List[RSDTestResult]]:
         """
-        모든 String에 대해 연결 테스트 수행 (재시도 기능 추가)
+        시스템에 등록된 모든 활성 String 및 RSD에 대해 연결 테스트를 순차적으로 수행
         
         Args:
             string_manager: String 관리자
             rsd_manager: RSD 관리자
-            enable_retry: 재시도 활성화 여부 (기본값: False - 기존 동작 유지)
+            enable_retry: 재시도 활성화 여부
             retry_count: 재시도 횟수 (기본값: 1)
             
         Returns:
@@ -553,7 +594,11 @@ class RSDTestManager:
     
     async def _perform_single_test(self, string_info: StringInfo, rsd_id: int) -> RSDTestResult:
         """
-        단일 테스트 수행 (기존 test_rsd_connection의 핵심 로직)
+        단일 RSD에 대한 실제 통신 테스트를 수행하고 결과를 반환
+
+        Args:
+            string_info: 테스트할 RSD가 속한 String 정보
+            rsd_id: 테스트할 RSD ID
         """
         start_time = datetime.now()
         error_message = ""

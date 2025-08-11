@@ -27,11 +27,7 @@ from PySide6.QtGui import QFont, QColor, QAction, QMovie, QPixmap, QPainter
 try:
     from config_manager import ConfigManager, DatabaseConfig
     from db_manager import DatabaseManager, ChannelData, RSDSensorData, StringInfo, DeviceInfo
-    from set_string import (
-        StringManager,
-        RSDManager, 
-        RSDTestManager
-    )
+    
     from communication import CommunicationManager
     from log import LogManager
     
@@ -86,7 +82,7 @@ class AppSettings:
 # =============================================================================
 
 class RSDChannelWidget(QFrame):
-    """개별 채널 데이터 표시 위젯 - 컴팩트 버전"""
+    """개별 채널(온도, 전류, 아크)의 데이터를 표시하는 위젯"""
     
     def __init__(self, channel_no: int):
         super().__init__()
@@ -175,7 +171,12 @@ class RSDChannelWidget(QFrame):
         layout.addLayout(data_layout)
         
     def update_data(self, channel_data: ChannelData):
-        """채널 데이터 업데이트"""
+        """
+        수신된 채널 데이터로 위젯의 내용을 갱신합니다.
+
+        Args:
+            channel_data: 갱신할 채널의 데이터
+        """
         self.temp_value.setText(f"{channel_data.temperature:.0f}°C")
         self.current_value.setText(f"{channel_data.current:.0f}A")
         
@@ -204,9 +205,14 @@ class RSDChannelWidget(QFrame):
 
 
 class RSDCompactWidget(QFrame):
-    """컴팩트한 RSD 위젯"""
+    """RSD 장치 표시 위젯"""
     
     def __init__(self, rsd_id: int, device_name: str = ""):
+        """
+        Args:
+            rsd_id: RSD 장치의 고유 ID
+            device_name: RSD 장치의 이름 (표시용)
+        """
         super().__init__()
         self.rsd_id = rsd_id
         self.device_name = device_name
@@ -264,7 +270,12 @@ class RSDCompactWidget(QFrame):
         layout.addLayout(channels_layout)
         
     def update_data(self, rsd_data: RSDSensorData):
-        """RSD 데이터 업데이트"""
+        """
+        수신된 RSD 데이터로 하위 채널 위젯들의 내용을 갱신
+
+        Args:
+            rsd_data: 갱신할 RSD의 전체 센서 데이터
+        """
         for channel_data in rsd_data.channels:
             channel_no = channel_data.channel_no
             if channel_no in self.channel_widgets:
@@ -275,6 +286,11 @@ class StringGroupWidget(QGroupBox):
     """String 그룹 위젯 - 같은 String의 RSD들을 묶어서 표시"""
     
     def __init__(self, string_id: int, string_info: StringInfo = None):
+        """
+        Args:
+            string_id: String의 고유 ID
+            string_info: String의 상세 정보 (IP, 설명 등)
+        """
         super().__init__()
         self.string_id = string_id
         self.string_info = string_info
@@ -323,7 +339,13 @@ class StringGroupWidget(QGroupBox):
         self.max_columns = 4
         
     def add_rsd_widget(self, rsd_id: int, device_name: str = ""):
-        """RSD 위젯 추가"""
+        """
+        String 그룹에 새로운 RSD 위젯을 동적으로 추가
+
+        Args:
+            rsd_id: 추가할 RSD의 ID
+            device_name: 추가할 RSD의 이름
+        """
         if rsd_id not in self.rsd_widgets:
             rsd_widget = RSDCompactWidget(rsd_id, device_name)
             self.rsd_widgets[rsd_id] = rsd_widget
@@ -338,7 +360,13 @@ class StringGroupWidget(QGroupBox):
         return self.rsd_widgets[rsd_id]
     
     def update_rsd_data(self, rsd_data: RSDSensorData):
-        """RSD 데이터 업데이트"""
+        """
+        수신된 RSD 데이터에 해당하는 RSD 위젯을 찾아 데이터를 갱신
+        - 만약 해당하는 RSD 위젯이 없으면 새로 생성
+
+        Args:
+            rsd_data: 갱신할 RSD의 센서 데이터
+        """
         rsd_id = rsd_data.rsd_id
         device_name = getattr(rsd_data, 'device_name', '')
         
@@ -400,7 +428,13 @@ class LoadingOverlay(QWidget):
         self.hide()
     
     def show_loading(self, title="초기화 중...", detail="작업을 진행하고 있습니다..."):
-        """로딩 화면 표시"""
+        """
+        로딩 오버레이 표시
+
+        Args:
+            title: 주 메시지
+            detail: 상세 메시지
+        """
         self.loading_label.setText(title)
         self.detail_label.setText(detail)
         self.show()
@@ -411,7 +445,13 @@ class LoadingOverlay(QWidget):
         self.hide()
     
     def update_message(self, title=None, detail=None):
-        """메시지 업데이트"""
+        """
+        표시된 로딩 오버레이 메세지 업데이트
+
+        Args:
+            title: 변경할 주 메시지
+            detail: 변경할 상세 메시지
+        """
         if title:
             self.loading_label.setText(title)
         if detail:
@@ -421,6 +461,11 @@ class SettingsDialog(QDialog):
     """설정 다이얼로그"""
     
     def __init__(self, config_manager: ConfigManager, parent=None):
+        """
+        Args:
+            config_manager: 현재 설정값을 읽고 저장하기 위한 ConfigManager 객체
+            parent: 부모 위젯
+        """
         super().__init__(parent)
         self.config_manager = config_manager
         self.setup_ui()
@@ -509,11 +554,11 @@ class SettingsDialog(QDialog):
         info_layout.addWidget(info_title)
         
         detail_label = QLabel("""
-- 통신 주기: RSD와 센서 데이터를 주고받는 통신 간격
-- 화면 갱신 주기: RSD 센서 데이터를 화면에 표시하는 간격
-- 데이터베이스 저장 주기: 수집된 데이터를 DB에 저장하는 간격
-- RSD별 개별 갱신: 각 RSD 통신 완료시 즉시 화면 갱신
-- 설정 변경사항은 다음 모니터링 시작시 적용됩니다
+    - 통신 주기: RSD와 센서 데이터를 주고받는 통신 간격
+    - 화면 갱신 주기: RSD 센서 데이터를 화면에 표시하는 간격
+    - 데이터베이스 저장 주기: 수집된 데이터를 DB에 저장하는 간격
+    - RSD별 개별 갱신: 각 RSD 통신 완료시 즉시 화면 갱신
+    - 설정 변경사항은 다음 모니터링 시작시 적용됩니다
         """)
         detail_label.setStyleSheet("""
             background-color: #f8f9fa; 
@@ -593,10 +638,11 @@ class SettingsDialog(QDialog):
 
 # =============================================================================
 # 모니터링 스레드 클래스
+# - 실제 데이터 수집 및 저장을 담당하는 백그라운드 작업자
 # =============================================================================
 
 class MonitoringThread(QThread):
-    """RSD 통신 데이터 수집 스레드 - 완전 클래스 기반, LogManager 의존성 주입"""
+    """RSD 통신, 데이터 수집, DB 저장을 비동기적으로 처리하는 스레드"""
     data_updated = Signal(list)
     single_rsd_updated = Signal(object)
     status_updated = Signal(str)
@@ -605,26 +651,31 @@ class MonitoringThread(QThread):
     backup_finished = Signal(str)
     
     def __init__(self, config_manager: ConfigManager):
+        """
+        MonitoringThread 초기화
+
+        Args:
+            config_manager: 시스템 설정 관리자 객체
+        """
         super().__init__()
         self.config_manager = config_manager
-        self.is_running = False
-        self.is_initializing = False
+        self.is_running = False #  # 스레드의 메인 루프 실행/종료 제어 플래그
+        self.is_initializing = False # 초기화 진행 상태 플래그
         
         # 백엔드 서비스들
         self.db_manager = None
         self.db_connection = None
         self.communication_manager = None
         
-        # 이벤트 루프 관리용 변수 추가
+        # 비동기 이벤트 루프 관리
         self._event_loop = None
         self._shutdown_complete = False
         
-        # 저장 주기 관리를 위한 새로운 변수들 추가
-        self._sensor_data_buffer = []  # 데이터 버퍼
-        self._last_save_time = None    # 마지막 저장 시간
-        self._save_task = None         # 저장 태스크
+        # 데이터 저장 버퍼 및 스케줄링
+        self._sensor_data_buffer = [] 
+        self._last_save_time = None 
+        self._save_task = None 
         
-        # LogManager 의존성 주입 방식으로 변경
         self.log_manager = None
         if LOGGING_AVAILABLE:
             self.log_manager = LogManager(config_manager)
@@ -632,14 +683,15 @@ class MonitoringThread(QThread):
 
     def run_final_save_blocking(self):
         """
-        동기 컨텍스트에서 최종 저장 로직을 실행하기 위한 블로킹 메서드.
-        스레드가 시작되어 manager들이 초기화되었다고 가정합니다.
+        동기 컨텍스트에서 프로그램 종료 직전, 남은 데이터를 안전하게 저장하기 위한 블로킹 메서드
+        비동기 컨텍스트가 이미 종료되었을 수 있으므로, 임시 이벤트 루프를 생성하여 비동기 저장 메서드(_final_data_save)를 실행
         """
+        # 버퍼에 저장할 데이터가 없으면 즉시 종료
         buffer_count = len(self._sensor_data_buffer) if hasattr(self, '_sensor_data_buffer') else 0
         if buffer_count == 0:
             return
 
-        # 저장을 위한 의존성(manager)들이 준비되었는지 확인
+        # DB 저장에 필요한 관리자 객체들이 초기화되었는지 최종 확인
         if not all(hasattr(self, mgr) and getattr(self, mgr) for mgr in ['db_manager', 'communication_manager']):
             if self.log_manager:
                 self.log_manager.error_log("최종저장", "저장에 필요한 관리자 객체가 초기화되지 않아 저장할 수 없습니다.")
@@ -648,7 +700,7 @@ class MonitoringThread(QThread):
         if self.log_manager:
             self.log_manager.operation_log("시스템", f"프로그램 종료 전 최종 데이터 저장 시작. (대상: {buffer_count}개)")
 
-        # 새 이벤트 루프를 사용하여 비동기 저장 실행
+        # 새로운 임시 이벤트 루프를 생성하여 비동기 저장 로직 실행
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -659,8 +711,10 @@ class MonitoringThread(QThread):
 
     async def _save_data_with_retry_and_backup(self, data_to_save: List[RSDSensorData]):
         """
-        데이터를 DB에 저장하되, 모든 재시도가 실패했을 때만 CSV로 백업합니다.
-        성공 시 또는 백업 성공 시 버퍼를 비워 중복 저장을 방지합니다.
+        수집된 데이터를 DB에 저장하되, 실패 시 재시도하고 최종적으로 CSV 백업까지 처리하는 비동기 메서드
+
+        Args:
+            data_to_save: 저장할 센서 데이터 리스트
         """
         if not data_to_save:
             return
@@ -669,6 +723,7 @@ class MonitoringThread(QThread):
         total_attempts = 1 + max_retries
         success = False
 
+        # 기본 시도(1회) + 재시도(max_retries) 만큼 루프 실행
         for attempt in range(total_attempts):
             try:
                 if self.log_manager:
@@ -695,7 +750,7 @@ class MonitoringThread(QThread):
                 if self.log_manager:
                     self.log_manager.error_log("데이터저장", f"시도 #{attempt + 1} 중 예외 발생: {e}")
 
-            # 마지막 시도가 아니면 잠시 대기 (1차, 2차 시도 후에만)
+            # 마지막 시도가 아닐 경우, 잠시 대기 후 재시도
             if attempt < max_retries:
                 await asyncio.sleep(1.0)
 
@@ -706,7 +761,7 @@ class MonitoringThread(QThread):
                     f"총 {total_attempts}회 DB 저장 실패. CSV 백업을 시작합니다.")
 
             try:
-                # 올바른 백업 메서드 호출: DatabaseManager → SensorDataRepository
+                # SensorDataRepository의 백업 메서드 호출
                 file_path = self.db_manager.get_sensor_repository().backup_data_to_csv(data_to_save)
 
                 if file_path:
@@ -724,7 +779,7 @@ class MonitoringThread(QThread):
 
     async def _process_log_backups_if_any(self):
         """
-        백업된 로그 파일이 있는지 확인하고 처리를 시도합니다.
+        백업된 로그 파일이 있는지 확인하고 처리를 시도
         """
         if not self.db_manager:
             return
@@ -804,7 +859,7 @@ class MonitoringThread(QThread):
 
    
     def run(self):
-        """스레드 실행"""
+        """메인 스레드 실행"""
         self.is_running = True
         self._shutdown_complete = False
         
@@ -823,7 +878,10 @@ class MonitoringThread(QThread):
             self._complete_shutdown()
 
     async def _async_monitoring_loop(self):
-        """비동기 모니터링 루프 - monitoring_communication_interval 사용"""
+        """
+        비동기 모니터링 루프
+        시스템 초기화, 데이터 수집, DB 저장 스케줄링 등 핵심 로직을 총괄
+        """
         try:
             # 1. 시스템 초기화
             self.is_initializing = True
@@ -847,10 +905,10 @@ class MonitoringThread(QThread):
                     f"화면 갱신 주기: {self.config_manager.monitoring_display_interval}초, "
                     f"DB 저장 주기: {self.config_manager.monitoring_save_interval}초")
             
-            # 2. 저장 주기 타이머 시작 (별도 태스크로 실행)
+            # 2. DB 저장 스케줄러를 별도의 백그라운드 태스크로 시작
             self._save_task = asyncio.create_task(self._database_save_scheduler())
             
-            # 3. 실시간 모니터링 루프 (통신 주기 기반)
+            # 3. 실시간 모니터링 루프: self.is_running 플래그가 True인 동안 계속 반복
             while self.is_running:
                 cycle_count += 1
                 
@@ -858,21 +916,21 @@ class MonitoringThread(QThread):
                     if not self.is_running:
                         break
                     
-                    # 센서 데이터 수집
+                    # 3-1. 모든 활성 RSD 장치로부터 센서 데이터를 수집
                     sensor_data_list = await self.communication_manager.collect_all_data()
                     
                     if sensor_data_list:
-                        # 개별 RSD 데이터 즉시 UI 업데이트
+                        # 3-2. 수집된 데이터는 GUI로 보내 실시간으로 화면을 업데이트
                         for sensor_data in sensor_data_list:
                             if not self.is_running:
                                 break
                             self.single_rsd_updated.emit(sensor_data)
                         
-                        # 데이터를 버퍼에 추가 (저장은 별도 스케줄러에서 처리)
+                        # 3-3. 수집된 데이터는 나중에 한꺼번에 저장하기 위해 버퍼에 추가
                         self._add_to_buffer(sensor_data_list)
                     
-                    # 상태 업데이트
-                    if cycle_count % 10 == 0:  # 10 사이클마다 상태 업데이트
+                    # 3-4. (주기적) 현재 상태를 GUI의 상태 표시줄에 업데이트
+                    if cycle_count % 10 == 0:
                         stats = self.communication_manager.get_statistics()
                         buffer_size = len(self._sensor_data_buffer)
                         last_save_info = self._get_last_save_info()
@@ -881,7 +939,7 @@ class MonitoringThread(QThread):
                             f"대기 데이터 {buffer_size}개, {last_save_info})"
                         )
                     
-                    # 통신 주기만큼 대기
+                    # 3-5. 설정된 통신 주기(communication_interval)만큼 대기
                     for _ in range(self.config_manager.monitoring_communication_interval * 10):
                         if not self.is_running:
                             break
@@ -905,13 +963,13 @@ class MonitoringThread(QThread):
             if self.log_manager:
                 self.log_manager.error_log("모니터링", f"모니터링 루프 치명적 오류: {str(e)}")
         finally:
-            # 종료 처리 시작
+            # 4. 루프 종료 시 처리: 스레드가 안전하게 종료되도록 리소스를 정리
             if self.log_manager:
                 buffer_count = len(self._sensor_data_buffer)
                 self.log_manager.operation_log("종료", 
                     f"모니터링 종료 처리 시작 - 남은 버퍼 데이터: {buffer_count}개")
             
-            # 1. 저장 스케줄러 태스크 중지
+            # 4-1. 실행 중인 저장 스케줄러 태스크를 안전하게 취소
             if self._save_task and not self._save_task.done():
                 if self.log_manager:
                     self.log_manager.operation_log("종료", "저장 스케줄러 태스크 취소 중...")
@@ -922,19 +980,19 @@ class MonitoringThread(QThread):
                     if self.log_manager:
                         self.log_manager.operation_log("종료", "저장 스케줄러 태스크 취소 완료")
             
-            # 2. 남은 버퍼 데이터 최종 저장 (중요!)
+            # 4-2. 버퍼에 남아있는 모든 데이터를 최종적으로 저장하여 유실을 방지
             try:
                 await self._final_data_save()
             except Exception as e:
                 if self.log_manager:
                     self.log_manager.error_log("종료", f"최종 데이터 저장 중 오류: {str(e)}")
             
-            # 3. 종료 완료 로그
+            # 4-3. 종료 완료 로그
             if self.log_manager:
                 self.log_manager.operation_log("종료", "모니터링 루프 종료 처리 완료")
 
     async def _database_save_scheduler(self):
-        """데이터베이스 저장 스케줄러 - 절대 시간 기준으로 정확한 주기 관리"""
+        """일정 주기(save_interval)마다 버퍼의 데이터를 DB에 저장하는 스케줄러"""
         try:
             save_interval = self.config_manager.monitoring_save_interval
             
@@ -1014,7 +1072,12 @@ class MonitoringThread(QThread):
                 self.log_manager.error_log("저장", f"저장 스케줄러 실행 오류: {str(e)}")
     
     def _add_to_buffer(self, sensor_data_list):
-        """센서 데이터를 버퍼에 추가 - 디버그 로그 추가"""
+        """
+        수집된 센서 데이터를 임시 저장 버퍼(_sensor_data_buffer)에 추가
+        
+        Args:
+            sensor_data_list: 버퍼에 추가할 센서 데이터 리스트
+        """
         old_buffer_size = len(self._sensor_data_buffer)
         self._sensor_data_buffer.extend(sensor_data_list)
         new_buffer_size = len(self._sensor_data_buffer)
@@ -1047,7 +1110,14 @@ class MonitoringThread(QThread):
 
 
     async def _save_buffered_data(self):
-        """버퍼에 있는 데이터를 데이터베이스에 저장 - 디버그 로그 추가"""
+        """
+        현재 버퍼(_sensor_data_buffer)에 쌓인 모든 데이터를 DB에 저장
+        
+        TODO
+        : 이 메서드는 현재 `_database_save_scheduler`에서 직접 사용되지 않고
+        대신 재시도와 백업 기능이 포함된 `_save_data_with_retry_and_backup`이 사용되고 있으므로,
+        추후 디버그 용도 등으로 변경 예정
+        """
         if not self._sensor_data_buffer:
             return
         
@@ -1087,7 +1157,7 @@ class MonitoringThread(QThread):
                 self.log_manager.error_log("저장", f"버퍼 데이터 저장 중 오류: {str(e)}")
 
     async def _final_data_save(self):
-        """프로그램 종료 시 남은 데이터 최종 저장 - 개선된 버전"""
+        """프로그램 종료 시 남은 데이터 최종 저장"""
         buffer_count = len(self._sensor_data_buffer)
         
         if self.log_manager:
@@ -1113,7 +1183,7 @@ class MonitoringThread(QThread):
                 
 
     def _get_last_save_info(self):
-        """마지막 저장 시간 정보 반환 - 더 상세한 정보 제공"""
+        """GUI 상태 표시줄에 표시할 '마지막 저장 시간' 관련 정보 생성 메서드"""
         if self._last_save_time:
             elapsed = (datetime.now() - self._last_save_time).total_seconds()
             save_interval = self.config_manager.monitoring_save_interval
@@ -1243,12 +1313,17 @@ class MonitoringThread(QThread):
 
     
     async def _handle_db_reconnection(self):
-        """DB 재연결 시 호출될 콜백 함수. 백업 데이터 처리를 담당합니다."""
+        """
+        DB 연결이 복구되었을 때 `DatabaseManager`에 의해 호출되는 콜백 함수
+        - DB에 저장되지 못하고 로컬에 백업된 CSV 파일이 있는 경우, 호출된 이 함수에서 해당 백업 파일들을 다시 DB에 저장하는 작업을 시작
+        """
         logger.info("DB 재연결 콜백 수신. 백업된 데이터 처리를 시작합니다.")
         try:
             if self.db_manager:
+                # SensorDataRepository에 쌓인 데이터 백업 처리 요청
                 if self.db_manager.sensor_repository:
                     await self.db_manager.sensor_repository.process_pending_backups()
+                # AlertRepository에 쌓인 로그 백업 처리 요청
                 if self.db_manager.alert_repository:
                     await self.db_manager.alert_repository.process_pending_log_backups()
                 logger.info("백업 데이터 처리 완료.")
@@ -1258,7 +1333,7 @@ class MonitoringThread(QThread):
             logger.error(f"백업 데이터 처리 중 오류 발생: {e}")
 
     async def _cleanup_resources(self):
-        """리소스 정리 작업 - 향상된 정리 로직"""
+        """리소스 정리 작업"""
         try:
             if self.log_manager:
                 self.log_manager.operation_log("시스템", "리소스 정리 시작")
@@ -1300,7 +1375,7 @@ class MonitoringThread(QThread):
                 self.log_manager.error_log("시스템", f"리소스 정리 중 오류: {e}")
 
     def _complete_shutdown(self):
-        """이벤트 루프 완전 종료 처리 - 데이터 보존 우선"""
+        """이벤트 루프 완전 종료 처리"""
         if self._shutdown_complete:
             return
         
@@ -1403,7 +1478,7 @@ class MonitoringThread(QThread):
             self.is_running = False
 
     async def _emergency_final_save(self):
-        """긴급 최종 저장 - 이벤트 루프 종료 전 실행"""
+        """긴급 최종 저장"""
         if not self._sensor_data_buffer:
             return
         
@@ -1571,7 +1646,7 @@ class RSDMonitoringMainWindow(QMainWindow):
 
 
     def get_or_create_string_info(self, string_id: int) -> StringInfo:
-        """String 정보를 가져오거나 생성 - 캐시 활용"""
+        """String 정보를 가져오거나 생성"""
         if string_id in self.string_cache:
             return self.string_cache[string_id]
         
@@ -1899,6 +1974,9 @@ class RSDMonitoringMainWindow(QMainWindow):
     def _on_backup_finished(self, file_path: str):
         """
         데이터 백업 완료 시 사용자에게 알리는 슬롯
+        
+        Args:
+            file_path: 백업된 파일의 경로
         """
         QMessageBox.warning(
             self,
@@ -1954,7 +2032,8 @@ class RSDMonitoringMainWindow(QMainWindow):
 
     def _on_monitoring_stopped(self, is_exiting: bool):
         """
-        모니터링 스레드가 완전히 종료된 후 UI를 정리하고, 필요시 프로그램을 종료합니다.
+        모니터링 스레드가 완전히 종료된 후 호출되는 슬롯
+        UI 상태를 초기화하고, 필요시 프로그램을 종료
         
         Args:
             is_exiting: 프로그램 종료의 일부로 호출되었는지 여부.
@@ -1975,7 +2054,13 @@ class RSDMonitoringMainWindow(QMainWindow):
 
 
     def update_initialization_progress(self, message: str, detail: str):
-        """초기화 진행상황 업데이트"""
+        """
+        [슬롯] 스레드로부터 초기화 진행 상황 메시지를 받아 로딩 화면에 업데이트
+
+        Args:
+            message: 주 메시지
+            detail: 상세 메시지
+        """
         if self.is_initializing:
             self.loading_overlay.update_message(message, detail)
             
@@ -1994,7 +2079,12 @@ class RSDMonitoringMainWindow(QMainWindow):
                 self.log_manager.operation_log("UI", "초기화 상태가 아닌 상태에서 진행상황 메시지 수신")
     
     def update_single_rsd_data(self, sensor_data: RSDSensorData):
-        """단일 RSD 데이터 업데이트"""
+        """
+        [슬롯] 스레드로부터 개별 RSD 데이터를 받아 UI 위젯을 업데이트
+
+        Args:
+            sensor_data: 갱신할 RSD의 센서 데이터
+        """
         try:
             string_id = sensor_data.string_id
             
@@ -2079,7 +2169,7 @@ class RSDMonitoringMainWindow(QMainWindow):
             self.loading_overlay.resize(self.size())
     
     def closeEvent(self, event):
-        """윈도우 종료 이벤트를 처리합니다."""
+        """윈도우 종료 이벤트 처리"""
         # 1. 모니터링 스레드가 실행 중인 경우, 사용자에게 확인 후 안전하게 종료
         if self.monitoring_thread and self.monitoring_thread.isRunning():
             msg_box = QMessageBox(self)
@@ -2202,7 +2292,13 @@ class RSDMonitoringMainWindow(QMainWindow):
             QMessageBox.critical(self, '오류', f'백업 데이터 처리 중 오류가 발생했습니다: {e}')
 
     def _show_backup_result_message(self, summary_data, summary_logs):
-        """백업 처리 결과를 요약하여 메시지 박스로 표시합니다."""
+        """
+        백업 처리 결과를 요약하여 메시지 박스로 표시합니다.
+
+        Args:
+            summary_data: 센서 데이터 복구 결과
+            summary_logs: 로그 데이터 복구 결과
+        """
         
         title = "복구 결과"
         final_message = ""
@@ -2244,6 +2340,7 @@ class RSDMonitoringMainWindow(QMainWindow):
         else:
             title = "복구 성공"
             QMessageBox.information(self, title, final_message)
+
 
 # =============================================================================
 # 메인 함수들

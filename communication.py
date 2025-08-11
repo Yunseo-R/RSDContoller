@@ -2,9 +2,6 @@
 RSD 통신 모듈
 TCP/RS485 통신을 통한 실시간 센싱 데이터 수집
 실제 모니터링 통신 전담
-DatabaseManager Repository 패턴 호환
-LogManager 의존성 주입 적용
-save_sensor_data_batch 메서드 및 누락 기능 추가
 """
 
 import socket
@@ -20,10 +17,6 @@ from db_manager import (
     StringInfo,
     DeviceInfo,
     ChannelData
-)
-from set_string import (
-    StringManager,
-    RSDManager
 )
 
 
@@ -43,7 +36,7 @@ class RSDCommunicationProtocol:
         프로토콜 초기화
         
         Args:
-            log_manager: LogManager 인스턴스 (선택사항)
+            log_manager: LogManager 인스턴스
         """
         self.log_manager = log_manager
     
@@ -192,7 +185,7 @@ class RSDDataCollector:
         Args:
             config: 설정 관리자
             log_manager: LogManager 인스턴스
-            alert_repository: AlertRepository 인스턴스
+            alert_repository: 통신 실패 시 알림 저장을 위한 저장소
         """
         self.config = config
         self.log_manager = log_manager 
@@ -226,7 +219,22 @@ class RSDDataCollector:
     
     async def _collect_single_rsd_data(self, string_info: StringInfo, 
                                      device: DeviceInfo) -> Optional[RSDSensorData]:
-        """단일 RSD에서 센서 데이터 수집 (LogManager 로그 기록 추가)"""
+        """
+        단일 RSD에서 센서 데이터 수집 (LogManager 로그 기록 추가)
+
+        Args:
+            string_info : 통신할 RSD가 속한 String의 정보.
+            device : 통신할 RSD 장치의 정보.
+
+        Returns:
+            데이터 수집 및 파싱 성공 시 RSDSensorData 객체, 실패 시 None
+        
+        TODO 
+        : config.ini의 [tcp_communication] 섹션에 정의된 max_retries, retry_delay 설정이 실제 통신 로직에 반영되어 있지 않으므로,
+        이 설정값을 기반으로 재시도 로직 추가 필요. 
+        : sock = socket.socket() 매번 생성/ 해제되는 소켓을 
+        연결 풀 크기 및 수명 관리 등 연결 안정성 향상 방안 구현 필요
+        """
         start_time = datetime.now()
         sock = None # 소켓 변수 초기화
         
@@ -311,23 +319,20 @@ class RSDDataCollector:
             return None
             
         finally:
-            # ✅ 모든 경우에 소켓이 닫히도록 보장
+            # 모든 경우에 소켓이 닫히도록 보장
             if sock:
                 sock.close()
 
 
     async def close_all_connections(self):
         """
-        데이터 수집기의 모든 연결을 종료합니다.
-        (현재 구조에서는 요청마다 소켓을 생성/해제하므로 특별한 정리 로직이 필요하지 않으나,
-         향후 소켓 풀링 등 확장성을 위해 메서드를 유지합니다.)
+        데이터 수집기의 모든 연결을 종료
         """
         try:
             if self.log_manager:
                 self.log_manager.operation_log("데이터수집", "데이터 수집기 연결 종료 시작")
             
-            # 현재 활성 소켓이 있다면 종료 (향후 확장용)
-            
+            # 현재 활성 소켓이 있다면 종료            
             if self.log_manager:
                 self.log_manager.operation_log("데이터수집", "데이터 수집기 연결 종료 완료")
                 
@@ -350,7 +355,7 @@ class CommunicationManager:
         Args:
             config: 설정 관리자
             db_manager: 데이터베이스 관리자
-            log_manager: LogManager 인스턴스 (선택사항)
+            log_manager: LogManager 인스턴스
         """
         self.config = config
         self.db_manager = db_manager
@@ -409,7 +414,13 @@ class CommunicationManager:
             return False
     
     def set_active_devices(self, strings: List[StringInfo], devices: List[DeviceInfo]) -> None:
-        """활성 기기 목록 설정"""
+        """
+        모니터링할 활성 장치 목록을 설정
+
+        Args:
+            strings: 활성화된 String 정보 리스트
+            devices: 활성화된 RSD 장치 정보 리스트
+        """
         self.active_strings = strings
         self.active_devices = {}
         
@@ -426,7 +437,7 @@ class CommunicationManager:
     
 
     async def collect_all_data(self) -> List[RSDSensorData]:
-        """모든 활성 기기에서 데이터 수집 (원본 메서드명 유지)"""
+        """모든 활성 기기에서 데이터 수집"""
         all_data = []
         start_time = datetime.now()
         
@@ -473,10 +484,13 @@ class CommunicationManager:
 
     async def save_collected_data(self, sensor_data_list: List[RSDSensorData]) -> int:
         """
-        수집된 데이터를 데이터베이스에 저장합니다.
+        수집된 센서 데이터 리스트를 DB에 저장하도록 요청합니다.
+
+        Args:
+            sensor_data_list: 저장할 센서 데이터 리스트
 
         Returns:
-            저장된 레코드 개수
+            int: 성공적으로 저장된 레코드의 개수
         """
         if not sensor_data_list:
             return 0
@@ -559,13 +573,24 @@ class CommunicationManager:
             }
     
     def _update_statistics(self, result: Dict[str, Any], total_count: int) -> None:
-        """통계 정보 업데이트"""
+        """
+        통신 통계 정보를 갱신
+
+        Args:
+            result: 저장 결과 (성공/실패 카운트 포함)
+            total_count: 총 시도 횟수
+        """
         self.total_requests += total_count
         self.successful_requests += result.get('success_count', 0)
         self.failed_requests += result.get('error_count', 0)
     
     async def _process_arc_alerts(self, sensor_data_list: List[RSDSensorData]) -> None:
-        """아크 발생 알림 처리"""
+        """
+        아크 발생 알람 처리
+
+        Args:
+            sensor_data_list: 확인할 센서 데이터 리스트
+        """
         for sensor_data in sensor_data_list:
             for channel in sensor_data.channels:
                 if channel.is_arc:
@@ -649,7 +674,7 @@ class CommunicationManager:
                 self.log_manager.error_log("통신시스템", f"연결 종료 중 오류: {e}")
     
     def reset_statistics(self) -> None:
-        """통신 통계 초기화 - 향상된 버전"""
+        """통신 통계 초기화"""
         try:
             # 기존 통계 리셋
             self._reset_statistics()

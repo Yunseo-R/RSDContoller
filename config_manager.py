@@ -1,7 +1,7 @@
 """
 RSD 모니터링 시스템 설정 관리자
-설정 파일(config.ini)의 생성, 파싱, 저장을 담당함.
-미완성 메서드들 완성
+설정 파일(config.ini)의 생성, 파싱, 저장을 담당
+각 설정 항목에 대한 기본값을 정의 및 유효성 검증
 """
 
 import os
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 
 # =============================================================================
-# 데이터 클래스들
+# 데이터 클래스
 # =============================================================================
 
 @dataclass
@@ -92,7 +92,10 @@ class ConfigManager:
             print("기본 설정 파일이 생성되었습니다.")
     
     def _load_config(self) -> None:
-        """설정 파일에서 값 로드"""
+        """
+        설정 파일(config.ini)에서 각 섹션의 값을 읽어와 변수에 할당
+        fallback을 사용하여 파일에 값이 없을 경우 기본값 유지
+        """
         try:
             self.config.read(self.config_path, encoding='utf-8')
             
@@ -136,8 +139,7 @@ class ConfigManager:
             print("일부 설정이 기본값으로 사용됩니다")
 
     def _create_default_config(self) -> None:
-        """기본 설정값으로 ConfigParser 객체 생성"""
-        # 기본값을 config 객체에 반영
+        """기본값으로 ConfigParser 객체 구성"""
         self._sync_variables_to_config()
 
     def _sync_variables_to_config(self) -> None:
@@ -182,7 +184,7 @@ class ConfigManager:
         self.config.set('logging', 'communication_detail', str(self.logging_communication_detail).lower())
     
     def _save_config(self) -> None:
-        """설정 파일 저장"""
+        """현재 설정값들을 config.ini 파일에 저장"""
         try:
             # 현재 변수값들을 config 객체에 동기화
             self._sync_variables_to_config()
@@ -197,12 +199,13 @@ class ConfigManager:
         except Exception as e:
             print(f"설정 파일 저장 실패: {e}")
     
-    # =========================================================================
-    # 데이터베이스 설정 접근 메서드
-    # =========================================================================
-    
+# =========================================================================
+# 설정 접근 및 관리 메서드
+# =========================================================================
+
+# ----------------- 데이터베이스 설정 -----------------
     def get_database_config(self) -> DatabaseConfig:
-        """데이터베이스 설정 객체 반환"""
+        """데이터베이스 설정을 DatabaseConfig 객체로 반환"""
         return DatabaseConfig(
             host=self.database_host,
             port=self.database_port,
@@ -214,7 +217,16 @@ class ConfigManager:
     def update_database_config(self, host: Optional[str] = None, port: Optional[int] = None,
                              database: Optional[str] = None, username: Optional[str] = None,
                              password: Optional[str] = None) -> None:
-        """데이터베이스 설정 업데이트"""
+        """
+        데이터베이스 설정 업데이트 및 파일에 즉시 저장
+
+        Args:
+            host: DB 호스트 주소
+            port: DB 포트 번호
+            database: 데이터베이스 이름
+            username: 사용자 이름
+            password: 비밀번호
+        """
         if host is not None:
             self.database_host = host
         if port is not None:
@@ -229,22 +241,19 @@ class ConfigManager:
         self._save_config()
         print("데이터베이스 설정이 업데이트되었습니다")
     
-    # =========================================================================
-    # 모니터링 설정 접근 메서드
-    # =========================================================================
-    
+# -----------------모니터링 설정-----------------
     def update_monitoring_settings(self, communication_interval: Optional[int] = None,
                                  display_interval: Optional[int] = None,
                                  save_interval: Optional[int] = None,
                                  rsd_communication_delay: Optional[float] = None) -> None:
         """
-        모니터링 설정 업데이트
-        
+        모니터링 설정 업데이트 및 파일에 즉시 저장
+
         Args:
-            communication_interval: 통신 간격 (초)
-            display_interval: 표시 갱신 간격 (초)
-            save_interval: 저장 간격 (초)
-            rsd_communication_delay: RSD 간 통신 지연 (초)
+            communication_interval: 통신 주기 (초).
+            display_interval 화면 갱신 주기 (초).
+            save_interval: DB 저장 주기 (초).
+            rsd_communication_delay: RSD 장치 간 통신 지연 시간 (초).
         """
         if communication_interval is not None:
             self.monitoring_communication_interval = communication_interval
@@ -259,7 +268,7 @@ class ConfigManager:
         print("모니터링 설정이 업데이트되었습니다")
     
     def get_monitoring_intervals(self) -> dict:
-        """모니터링 간격 설정 반환"""
+        """모니터링 간격 설정 딕셔너리 형태로 반환"""
         return {
             'communication_interval': self.monitoring_communication_interval,
             'display_interval': self.monitoring_display_interval,
@@ -267,10 +276,7 @@ class ConfigManager:
             'rsd_communication_delay': self.monitoring_rsd_communication_delay
         }
     
-    # =========================================================================
-    # TCP 통신 설정 접근 메서드
-    # =========================================================================
-    
+# ----------------- TCP 통신 설정 -----------------
     def update_tcp_settings(self, connection_timeout: Optional[float] = None,
                           read_timeout: Optional[float] = None,
                           max_retries: Optional[int] = None,
@@ -279,16 +285,16 @@ class ConfigManager:
                           socket_reuse: Optional[bool] = None,
                           buffer_size: Optional[int] = None) -> None:
         """
-        TCP 통신 설정 업데이트
-        
+        TCP 통신 관련 설정 업데이트 및 파일에 즉시 저장
+
         Args:
             connection_timeout: 연결 타임아웃 (초)
             read_timeout: 읽기 타임아웃 (초)
             max_retries: 최대 재시도 횟수
             rsd_port: RSD 통신 포트
-            retry_delay: 재시도 지연 (초)
+            retry_delay: 재시도 간 지연 시간 (초)
             socket_reuse: 소켓 재사용 여부
-            buffer_size: 버퍼 크기
+            buffer_size: 통신 버퍼 크기
         """
         if connection_timeout is not None:
             self.tcp_connection_timeout = connection_timeout
@@ -309,7 +315,7 @@ class ConfigManager:
         print("TCP 통신 설정이 업데이트되었습니다")
     
     def get_tcp_settings(self) -> dict:
-        """TCP 통신 설정 반환"""
+        """TCP 통신 설정 딕셔너리 형태로 반환"""
         return {
             'connection_timeout': self.tcp_connection_timeout,
             'read_timeout': self.tcp_read_timeout,
@@ -320,10 +326,7 @@ class ConfigManager:
             'buffer_size': self.tcp_buffer_size
         }
     
-    # =========================================================================
-    # 로깅 설정 접근 메서드
-    # =========================================================================
-    
+# ----------------- 로깅 설정 -----------------
     def update_logging_settings(self, level: Optional[str] = None,
                               log_dir: Optional[str] = None,
                               daily_rotation: Optional[bool] = None,
@@ -332,16 +335,16 @@ class ConfigManager:
                               packet_debug: Optional[bool] = None,
                               communication_detail: Optional[bool] = None) -> None:
         """
-        로깅 설정 업데이트
-        
+        로깅 설정 업데이트 및 파일에 즉시 저장
+
         Args:
-            level: 로그 레벨
-            log_dir: 로그 디렉터리
-            daily_rotation: 일별 로그 파일 생성 여부
-            max_days_keep: 로그 파일 보관 일수
-            console_output: 콘솔 출력 여부
-            packet_debug: 패킷 디버그 로그 여부
-            communication_detail: 상세 통신 로그 여부
+            level: 로그 레벨 (e.g., "INFO", "DEBUG")
+            log_dir: 로그 파일 저장 디렉터리
+            daily_rotation: 로그 파일을 매일 새로 생성할지 여부
+            max_days_keep: 로그 파일 보관 최대 일수
+            console_output: 콘솔에 로그를 출력할지 여부
+            packet_debug: 통신 패킷 내용을 로그로 남길지 여부
+            communication_detail: 상세 통신 과정을 로그로 남길지 여부
         """
         if level is not None:
             self.logging_level = level
@@ -362,7 +365,7 @@ class ConfigManager:
         print("로깅 설정이 업데이트되었습니다")
     
     def get_logging_settings(self) -> dict:
-        """로깅 설정 반환"""
+        """로깅 설정 딕셔너리 형태로 반환"""
         return {
             'level': self.logging_level,
             'log_dir': self.logging_dir,
@@ -374,7 +377,7 @@ class ConfigManager:
         }
     
     # =========================================================================
-    # 설정 파일 관리 메서드
+    # 설정 파일 관리 유틸리티 메서드
     # =========================================================================
     
     def reload_config(self) -> bool:
@@ -394,11 +397,11 @@ class ConfigManager:
         print("모든 설정이 기본값으로 초기화되었습니다")
     
     def export_config(self, export_path: str) -> bool:
-        """설정을 다른 파일로 내보내기"""
+        """현재 설정을 다른 파일로 내보내기"""
         try:
             self._sync_variables_to_config()
             
-            # 디렉터리 생성
+            # 내보낼 경로에 디렉터리가 없으면 생성
             os.makedirs(os.path.dirname(export_path) if os.path.dirname(export_path) else '.', exist_ok=True)
             
             with open(export_path, 'w', encoding='utf-8') as configfile:
@@ -417,7 +420,7 @@ class ConfigManager:
                 print(f"설정 파일이 존재하지 않습니다: {import_path}")
                 return False
             
-            # 임시 ConfigParser로 파일 검증
+            # 임시 ConfigParser로 파일 유효성 검증
             temp_config = configparser.ConfigParser()
             temp_config.read(import_path, encoding='utf-8')
             

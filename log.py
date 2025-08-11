@@ -1,8 +1,7 @@
 """
 RSD 모니터링 시스템 로그 관리자
-날짜별 단일 로그 파일 생성, 4가지 카테고리 로그 관리
-완전 클래스 기반 구조, 전역 함수 완전 배제
-의존성 주입 패턴 적용
+날짜별 단일 로그 파일 생성 및 4가지 핵심 카테고리(동작, 통신, 패킷, 에러) 로그 관리
+의존성 주입(Dependency Injection) 패턴을 적용한 클래스 기반 구조
 """
 
 import logging
@@ -33,7 +32,7 @@ class LogManager:
         self._setup_logging()
     
     def _setup_logging(self) -> None:
-        """로깅 시스템 설정"""
+        """로깅 시스템의 기본 설정을 구성"""
         self.log_dir.mkdir(exist_ok=True)
         
         # 루트 로거 설정
@@ -63,7 +62,12 @@ class LogManager:
         self.operation_log("시스템", "로그 시스템 초기화 완료")
     
     def _setup_file_handler(self, formatter) -> None:
-        """파일 핸들러 설정 - 날짜별 단일 파일"""
+        """
+        날짜별 로그 파일을 위한 파일 핸들러를 설정
+
+        Args:
+            formatter: 로그 포매터 객체
+        """
         current_date = datetime.now().strftime('%Y-%m-%d')
         self._current_log_date = current_date
         
@@ -83,7 +87,7 @@ class LogManager:
                     handler.close()
                     self.logger.removeHandler(handler)
             
-            # 새 파일 핸들러 생성
+            # 새로운 날짜로 파일 핸들러 재생성
             formatter = logging.Formatter(
                 '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                 datefmt='%Y-%m-%d %H:%M:%S'
@@ -91,7 +95,7 @@ class LogManager:
             self._setup_file_handler(formatter)
     
     def _cleanup_old_logs(self) -> None:
-        """오래된 로그 파일 정리"""
+        """설정된 보관 기간(max_days_keep)보다 오래된 로그 파일을 삭제"""
         try:
             cutoff_date = datetime.now() - timedelta(days=self.config.logging_max_days_keep)
             
@@ -118,7 +122,7 @@ class LogManager:
         동작 로그 기록 (시스템, DB, 모니터링, UI 등)
         
         Args:
-            operation: 동작 유형 (시스템, DB, 모니터링, UI 등)
+            operation: 동작 유형 (e.g., "시스템", "DB", "모니터링")
             message: 로그 메시지
         """
         self._check_date_change()
@@ -133,8 +137,8 @@ class LogManager:
         Args:
             string_id: String ID
             rsd_id: RSD ID
-            operation: 작업 유형 (sensor_poll, connection_test 등)
-            status: 상태 (success, error, timeout 등)
+            operation: 작업 유형 (e.g., "sensor_poll", "connection_test")
+            status: 상태 (e.g., "success", "error", "timeout")
             duration: 소요 시간 (초)
             details: 상세 정보
         """
@@ -151,11 +155,12 @@ class LogManager:
     def packet_log(self, string_id: int, rsd_id: int, direction: str, packet_data: str) -> None:
         """
         패킷 로그 기록 (실제 송수신 패킷 데이터)
+        - `config.logging_packet_debug`가 True일 때만 기록
         
         Args:
             string_id: String ID
             rsd_id: RSD ID
-            direction: 방향 (send, recv)
+            direction: 방향 ("send" 또는 "recv")
             packet_data: 패킷 데이터 (hex 문자열)
         """
         self._check_date_change()
@@ -169,7 +174,7 @@ class LogManager:
         에러 로그 기록 (시스템 오류 및 예외)
         
         Args:
-            component: 컴포넌트명 (통신, DB, 시스템 등)
+            component: 에러가 발생한 컴포넌트명 (e.g., "통신", "DB")
             error_message: 에러 메시지
         """
         self._check_date_change()
@@ -184,7 +189,7 @@ class LogManager:
                                    request_packet: str, response_packet: str, 
                                    duration: float, data_count: int = 0) -> None:
         """
-        모니터링 통신 전용 로그 (요청/응답 패킷 쌍으로 기록)
+        모니터링 통신 전용 로그 (요청/응답 패킷을 한 쌍으로 기록)
         
         Args:
             string_id: String ID
@@ -221,7 +226,7 @@ class LogManager:
 
 
 # =============================================================================
-# 성능 타이머 클래스 (LogManager 의존성 주입)
+# 성능 타이머 클래스
 # =============================================================================
 
 class PerformanceTimer:
@@ -248,7 +253,14 @@ class PerformanceTimer:
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """컨텍스트 종료 및 로그 기록"""
+        """
+        컨텍스트 종료 및 로그 기록
+        
+        Args:
+            exc_type: 예외 유형 (예외 없으면 None)
+            exc_val: 예외 값 (예외 없으면 None)
+            exc_tb: 예외 트레이스백 (예외 없으면 None)
+        """
         if self.start_time is None:
             return
         
